@@ -100,6 +100,9 @@ class MusEnv(AECEnv):
         
         # Puntos totales para los equipos
         self.puntos_equipos = {"equipo_1": 0, "equipo_2": 0}
+
+        self.partidas_ganadas = {"equipo_1": 0, "equipo_2": 0}  # Nuevo: registro de partidas ganadas
+        self.partida_terminada = False  # Nuevo: indica si la partida actual terminó
         
         # Ganadores de cada fase para el recuento final
         self.ganadores_fases = {
@@ -118,7 +121,7 @@ class MusEnv(AECEnv):
         self.mazo = [(v, p) for p in range(4) for v in range(1, 13) if v not in [8, 9]]
         random.shuffle(self.mazo)
 
-    def reset(self, seed=42, options=None):
+    def reset(self, seed=75, options=None):
         if seed is not None:
             random.seed(seed)
             
@@ -130,6 +133,9 @@ class MusEnv(AECEnv):
         self.declaraciones_juego = {}
         self.valores_juego = {}
         self.ultima_decision = {agent: "Esperando..." for agent in self.agents}
+
+        self.puntos_equipos = {"equipo_1": 0, "equipo_2": 0}
+        self.partida_terminada = False
         
         # Reiniciar control de apuestas
         self.apuesta_actual = 0
@@ -569,7 +575,18 @@ class MusEnv(AECEnv):
             self.siguiente_jugador_que_puede_hablar()
         
         elif action == 7:  # Quiero
-            if self.apuesta_actual > 0 and self.equipo_apostador is not None:
+            if self.hay_ordago:
+                self.determinar_ganador_fase(fase)
+                equipo_ganador = self.ganadores_fases[fase]
+                if equipo_ganador:
+                    self.puntos_equipos[equipo_ganador] = 30  # Ganar la partida (30 puntos)
+                    self.partidas_ganadas[equipo_ganador] += 1  # Registrar partida ganada
+                    self.partida_terminada = True
+                    self.fase_actual = "RECUENTO"
+                    for agent in self.agents:
+                        self.dones[agent] = True
+                return
+            elif self.apuesta_actual > 0 and self.equipo_apostador is not None:
                 if equipo_actual != self.equipo_apostador:
                     self.determinar_ganador_fase(fase)
                     self.avanzar_fase()
@@ -744,16 +761,27 @@ class MusEnv(AECEnv):
             self.determinar_ganador_global()
 
     def determinar_ganador_global(self):
-        """Determina el ganador final del juego"""
-        equipo_ganador = max(self.puntos_equipos.items(), key=lambda x: x[1])[0]
+        """Determina el ganador de la partida actual y verifica si hay ganador del juego (mejor de 3)"""
+        equipo_ganador_partida = max(self.puntos_equipos.items(), key=lambda x: x[1])[0]
+        self.partidas_ganadas[equipo_ganador_partida] += 1
         
-        for agent in self.agents:
-            if self.equipo_de_jugador[agent] == equipo_ganador:
-                self.rewards[agent] = sum(self.puntos_equipos.values())
-            else:
-                self.rewards[agent] = -self.puntos_equipos[self.equipo_de_jugador[agent]]
+        # Verificar si algún equipo ganó 2 partidas
+        if self.partidas_ganadas["equipo_1"] >= 2 or self.partidas_ganadas["equipo_2"] >= 2:
+            ganador_juego = max(self.partidas_ganadas.items(), key=lambda x: x[1])[0]
+            for agent in self.agents:
+                if self.equipo_de_jugador[agent] == ganador_juego:
+                    self.rewards[agent] = 100  # Recompensa alta por ganar el juego
+                else:
+                    self.rewards[agent] = -100
+        else:
+            # Si no hay ganador del juego, solo asignar recompensas por la partida
+            for agent in self.agents:
+                if self.equipo_de_jugador[agent] == equipo_ganador_partida:
+                    self.rewards[agent] = 30
+                else:
+                    self.rewards[agent] = -30
         
-        return equipo_ganador
+        return equipo_ganador_partida
 
     def render(self):
         print(f"Fase: {self.fase_actual}")

@@ -148,6 +148,12 @@ def draw_table():
         draw_final_screen()
         return
     
+    partidas_texto = font.render(
+        f"Partidas: Equipo 1 ({mus_env.partidas_ganadas['equipo_1']}) - Equipo 2 ({mus_env.partidas_ganadas['equipo_2']})", 
+        True, WHITE
+    )
+    screen.blit(partidas_texto, (WIDTH // 2 - 150, 10))
+    
     # Texto informativo
     fase_texto = font.render(f"Fase: {mus_env.fase_actual}", True, WHITE)
     screen.blit(fase_texto, (20, 10))
@@ -279,24 +285,21 @@ def draw_table():
     # Mostrar puntos en fases de apuestas
     if mus_env.agent_selection == jugador_humano and mus_env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
         if jugador_humano in mus_env.jugadores_que_pueden_hablar:
-            puntos = mus_env.calcular_puntos(mus_env.manos[jugador_humano], mus_env.fase_actual)
-            texto_puntos = font.render(f"Tus puntos: {puntos}", True, WHITE)
-            screen.blit(texto_puntos, (WIDTH // 2 - 100, HEIGHT - 150))
-            
+
             if mus_env.fase_actual == "JUEGO":
                 valor_juego = mus_env.valores_juego[jugador_humano]
-                texto_valor = font.render(f"Valor de tu mano: {valor_juego}", True, BLUE)
+                texto_valor = font.render(f"Valor de tu mano: {valor_juego}", True, WHITE)
                 screen.blit(texto_valor, (WIDTH // 2 - 100, HEIGHT - 180))
 
     # Mostrar ganadores de cada fase
-    y_pos = 220
+    y_pos = 120
     for fase, ganador in mus_env.ganadores_fases.items():
         if ganador:
             texto = font.render(
                 f"{fase}: Ganador -> {ganador}", 
                 True, equipo_colors[ganador]
             )
-            screen.blit(texto, (WIDTH - 350, y_pos))
+            screen.blit(texto, (WIDTH - 300, y_pos))
             y_pos += 30
 
 def draw_final_screen():
@@ -311,6 +314,14 @@ def draw_final_screen():
     titulo = font_large.render("¡PARTIDA TERMINADA!", True, YELLOW)
     titulo_rect = titulo.get_rect(center=(WIDTH // 2, 50))
     screen.blit(titulo, titulo_rect)
+
+    if mus_env.partidas_ganadas["equipo_1"] >= 2 or mus_env.partidas_ganadas["equipo_2"] >= 2:
+        ganador_juego = max(mus_env.partidas_ganadas.items(), key=lambda x: x[1])[0]
+        texto_ganador = font_large.render(
+            f"¡GANADOR DEL JUEGO: {ganador_juego.upper()}!", 
+            True, equipo_colors[ganador_juego]
+        )
+        screen.blit(texto_ganador, (WIDTH // 2 - 200, HEIGHT - 100))
     
     # Mostrar todas las cartas de todos los jugadores
     for i, agent in enumerate(mus_env.agents):
@@ -554,10 +565,7 @@ def main():
                 # Lógica de IA mejorada para las fases de apuestas
                 if hasattr(mus_env, 'hay_ordago') and mus_env.hay_ordago:
                     if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
-                        if puntos > 25 or random.random() > 0.7:
-                            action = 7  # Quiero (aceptar)
-                        else:
-                            action = 5  # No quiero
+                        action = 7  # Quiero (capear)
                     else:
                         action = 0  # Paso
                 elif mus_env.apuesta_actual > 0:
