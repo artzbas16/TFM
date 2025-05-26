@@ -3,6 +3,7 @@ from pettingzoo.utils import agent_selector
 from gymnasium import spaces
 import numpy as np
 import random
+import time
 
 class MusEnv(AECEnv):
     metadata = {"render_modes": ["human"], "name": "mus_v0"}
@@ -36,7 +37,7 @@ class MusEnv(AECEnv):
         # Diccionarios para almacenar declaraciones
         self.declaraciones_pares = {}
         self.declaraciones_juego = {}
-        self.valores_juego = {}  # Para almacenar el valor numérico de cada mano
+        self.valores_juego = {}
         
         # Registro de decisiones de los jugadores
         self.ultima_decision = {agent: "Esperando..." for agent in self.agents}
@@ -47,10 +48,15 @@ class MusEnv(AECEnv):
         self.jugador_apostador = None
         self.ronda_completa = False
         self.jugadores_pasado = set()
+        self.jugadores_hablaron = set()
+        self.jugadores_que_pueden_hablar = set()
+        self.hay_ordago = False
+        self.jugadores_confirmaron_descarte = set()
         
         self.hand_size = 4
-        self.deck = [(v, s) for v in range(1, 13) for s in range(4) if v != 8 and v != 9]
-        self.mazo = self.deck.copy()  # Inicializar mazo
+        # Crear mazo sin 8s y 9s correctamente
+        self.deck = [(v, s) for v in range(1, 13) for s in range(4) if v not in [8, 9]]
+        self.mazo = self.deck.copy()
 
         # Acciones: 0=pasar, 1=envido, 2=mus, 3=no mus, 4=confirmar, 5=no quiero, 6=ordago, 
         # 7=quiero (capear), 11-14=descartar carta 0-3
@@ -64,16 +70,24 @@ class MusEnv(AECEnv):
             }) for agent in self.agents
         }
 
-        # Propiedades para manejar apuestas
+        # CORRECCIÓN: Estructura de apuestas que coincida con la GUI
         self.apuestas = {
-            "GRANDE": {"valor": 0, "retador": None, "ganador": None},
-            "CHICA": {"valor": 0, "retador": None, "ganador": None},
-            "PARES": {"valor": 0, "retador": None, "ganador": None},
-            "JUEGO": {"valor": 0, "retador": None, "ganador": None}
+            "equipo_1": {
+                "GRANDE": 0,
+                "CHICA": 0,
+                "PARES": 0,
+                "JUEGO": 0
+            },
+            "equipo_2": {
+                "GRANDE": 0,
+                "CHICA": 0,
+                "PARES": 0,
+                "JUEGO": 0
+            }
         }
-        self.ultimo_que_hablo = None
+        
         self.acciones_validas = {
-            "GRANDE": [0, 1, 5, 6, 7],  # 0=pasar, 1=envite, 5=no quiero, 6=ordago, 7=quiero
+            "GRANDE": [0, 1, 5, 6, 7],
             "CHICA": [0, 1, 5, 6, 7],
             "PARES": [0, 1, 5, 6, 7],
             "JUEGO": [0, 1, 5, 6, 7]
@@ -95,11 +109,16 @@ class MusEnv(AECEnv):
             "JUEGO": None
         }
 
+        # Control de tiempo para las acciones
+        self.action_delay = 1.0  # 1 segundo de delay
+        self.last_action_time = 0
+
     def generar_mazo(self):
+        """Generar mazo correctamente sin 8s y 9s"""
         self.mazo = [(v, p) for p in range(4) for v in range(1, 13) if v not in [8, 9]]
         random.shuffle(self.mazo)
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=42, options=None):
         if seed is not None:
             random.seed(seed)
             
@@ -118,6 +137,9 @@ class MusEnv(AECEnv):
         self.jugador_apostador = None
         self.ronda_completa = False
         self.jugadores_pasado = set()
+        self.jugadores_hablaron = set()
+        self.jugadores_que_pueden_hablar = set()
+        self.hay_ordago = False
         
         self.agents = self.possible_agents[:]
         self.agent_selector = agent_selector(self.agents)
@@ -130,19 +152,34 @@ class MusEnv(AECEnv):
         self.fase_actual = "MUS"
         
         # Reiniciar apuestas
-        for fase in self.apuestas:
-            self.apuestas[fase] = {"valor": 0, "retador": None, "ganador": None}
+        for equipo in self.apuestas:
+            for fase in self.apuestas[equipo]:
+                self.apuestas[equipo][fase] = 0
             
         # Reiniciar ganadores de fases
         for fase in self.ganadores_fases:
             self.ganadores_fases[fase] = None
             
-        # Devolver observación inicial
+        # Reiniciar tiempo
+        self.last_action_time = time.time()
+            
         return self.observe(self.agent_selection)
 
     def repartir_cartas(self):
-        self.manos = {agent: [self.mazo.pop() for _ in range(4)] for agent in self.agents}
-        # Calcular automáticamente las declaraciones y valores
+        """Verificar que hay suficientes cartas antes de repartir"""
+        if len(self.mazo) < len(self.agents) * self.hand_size:
+            self.generar_mazo()
+            
+        self.manos = {}
+        for agent in self.agents:
+            self.manos[agent] = []
+            for _ in range(self.hand_size):
+                if self.mazo:
+                    self.manos[agent].append(self.mazo.pop())
+                else:
+                    self.generar_mazo()
+                    self.manos[agent].append(self.mazo.pop())
+        
         self.actualizar_declaraciones()
 
     def actualizar_declaraciones(self):
@@ -152,67 +189,140 @@ class MusEnv(AECEnv):
         self.valores_juego = {}
         
         for agent in self.agents:
-            # Calcular si tiene pares
-            self.declaraciones_pares[agent] = self.tiene_pares(self.manos[agent])
+            if agent in self.manos:
+                # Calcular si tiene pares
+                self.declaraciones_pares[agent] = self.tiene_pares(self.manos[agent])
+                
+                # Calcular si tiene juego y su valor
+                valor_juego = self.calcular_valor_juego(self.manos[agent])
+                self.valores_juego[agent] = valor_juego
+                self.declaraciones_juego[agent] = valor_juego >= 31
+
+    def actualizar_jugadores_que_pueden_hablar(self):
+        """Mejorar la lógica de quién puede hablar"""
+        self.jugadores_que_pueden_hablar = set()
+        self.equipos_que_pueden_hablar = set()
+        
+        if self.fase_actual == "PARES":
+            for agent in self.agents:
+                if self.declaraciones_pares.get(agent, False):
+                    self.jugadores_que_pueden_hablar.add(agent)
+                    self.equipos_que_pueden_hablar.add(self.equipo_de_jugador[agent])
+        elif self.fase_actual == "JUEGO":
+            for agent in self.agents:
+                valor_juego = self.calcular_valor_juego(self.manos[agent])
+                # Permitir hablar si tiene juego (>=31) o si nadie tiene juego (todos pueden hablar)
+                if valor_juego >= 31 or not any(self.declaraciones_juego.values()):
+                    self.jugadores_que_pueden_hablar.add(agent)
+                    self.equipos_que_pueden_hablar.add(self.equipo_de_jugador[agent])
+        else:
+            # En otras fases, todos pueden hablar
+            self.jugadores_que_pueden_hablar = set(self.agents)
+            self.equipos_que_pueden_hablar = {"equipo_1", "equipo_2"}
             
-            # Calcular si tiene juego y su valor
-            valor_juego = self.calcular_valor_juego(self.manos[agent])
-            self.valores_juego[agent] = valor_juego
-            self.declaraciones_juego[agent] = valor_juego >= 31
+        # Si solo un equipo puede hablar, ese equipo gana automáticamente
+        if self.fase_actual in ["PARES", "JUEGO"] and len(self.equipos_que_pueden_hablar) == 1:
+            equipo_ganador = list(self.equipos_que_pueden_hablar)[0]
+            self.ganadores_fases[self.fase_actual] = equipo_ganador
+            
+            # Asignar puntos según la fase
+            if self.fase_actual == "PARES":
+                puntos = self.calcular_puntos_pares(equipo_ganador)
+            elif self.fase_actual == "JUEGO":
+                puntos = self.calcular_puntos_juego(equipo_ganador)
+            else:
+                puntos = 1
+                
+            self.puntos_equipos[equipo_ganador] += puntos
+            self.apuestas[equipo_ganador][self.fase_actual] = puntos
+            print(f"Equipo {equipo_ganador} gana {puntos} puntos en {self.fase_actual} automáticamente")
+            
+            self.avanzar_fase()
+        elif self.fase_actual in ["PARES", "JUEGO"] and len(self.equipos_que_pueden_hablar) == 0:
+            print(f"Nadie puede hablar en {self.fase_actual}, avanzando...")
+            self.avanzar_fase()
 
     def observe(self, agent):
+        """Verificar que el agente existe en las manos"""
+        if agent not in self.manos:
+            return {
+                "cartas": np.zeros((self.hand_size, 2), dtype=np.int8),
+                "fase": self.fases.index(self.fase_actual),
+                "turno": self.agent_name_mapping.get(self.agent_selection, 0)
+            }
+        
         return {
             "cartas": np.array(self.manos[agent], dtype=np.int8),
             "fase": self.fases.index(self.fase_actual),
-            "turno": self.agent_name_mapping[self.agent_selection]
+            "turno": self.agent_name_mapping.get(self.agent_selection, 0)
         }
     
     def _was_done_step(self, action):
-        # 1. Find the next agent that's not done
+        """Mejorar manejo de agentes terminados"""
         if self.agents:
-            self.agent_selection = self.agent_selector.next()
+            attempts = 0
+            while attempts < len(self.agents):
+                self.agent_selection = self.agent_selector.next()
+                if not self.dones.get(self.agent_selection, False):
+                    break
+                attempts += 1
         
-        # 2. Optional: You can add additional checks here
-        if action is not None:
-            assert self.action_spaces[self.agent_selection].contains(action), ''
-            f"Action {action} is invalid for agent {self.agent_selection}"
+        if action is not None and self.agent_selection in self.action_spaces:
+            assert self.action_spaces[self.agent_selection].contains(action), \
+                f"Action {action} is invalid for agent {self.agent_selection}"
         
-        # 3. Handle rewards accumulation for done agents
         if self.agent_selection in self.dones and self.dones[self.agent_selection]:
             self.rewards[self.agent_selection] = 0
 
+    def wait_for_action_delay(self):
+        """Esperar el tiempo necesario entre acciones"""
+        current_time = time.time()
+        time_since_last_action = current_time - self.last_action_time
+        
+        if time_since_last_action < self.action_delay:
+            time.sleep(self.action_delay - time_since_last_action)
+        
+        self.last_action_time = time.time()
+
     def calcular_puntos(self, mano, fase):
-        """Calcula los puntos para cada fase"""
+        """Mejorar cálculo de puntos"""
+        if not mano:
+            return 0
+            
         valores = sorted([carta[0] for carta in mano], reverse=True)
         
         if fase == "GRANDE":
-            # Suma de las 3 cartas más altas (sin contar la más baja)
             return sum(valores[:3])
         elif fase == "CHICA":
-            # Suma de las 3 cartas más bajas (sin contar la más alta)
-            return sum(valores[1:])
+            return sum(sorted(valores)[:3])
         elif fase == "PARES":
-            # Calcula pares, medias y duples
             counts = {}
             for v in valores:
                 counts[v] = counts.get(v, 0) + 1
             
-            if any(c >= 3 for c in counts.values()):
-                return 6  # Duples
+            if any(c >= 4 for c in counts.values()):
+                return 6
+            elif any(c >= 3 for c in counts.values()):
+                return 3
             elif list(counts.values()).count(2) >= 2:
-                return 5  # Medias
+                return 2
             elif any(c == 2 for c in counts.values()):
-                return 2  # Pares
+                return 1
             return 0
         elif fase == "JUEGO":
-            # Devolver el valor calculado para juego
-            return self.calcular_valor_juego(mano)
+            valor_juego = self.calcular_valor_juego(mano)
+            if valor_juego >= 31:
+                return valor_juego
+            else:
+                return -(30 - valor_juego)
 
     def calcular_valor_juego(self, mano):
-        """Calcula el valor de la mano para juego (figuras valen 10, las demás su valor)"""
+        """Calcula el valor de la mano para juego"""
+        if not mano:
+            return 0
+            
         total = 0
         for valor, _ in mano:
-            # Las figuras (10, 11, 12) valen 10 puntos
             if valor >= 10:
                 total += 10
             else:
@@ -220,7 +330,10 @@ class MusEnv(AECEnv):
         return total
 
     def tiene_pares(self, mano):
-        """Determina si un jugador tiene pares o no"""
+        """Determina si un jugador tiene pares"""
+        if not mano:
+            return False
+            
         valores = [carta[0] for carta in mano]
         counts = {}
         for v in valores:
@@ -236,69 +349,74 @@ class MusEnv(AECEnv):
         return True
     
     def siguiente_jugador_que_puede_hablar(self):
-        """Encuentra el siguiente jugador que puede hablar en la fase actual"""
-        # Guardar el jugador actual
-        jugador_actual = self.agent_selection
+        """Mejorar búsqueda del siguiente jugador"""
+        self.actualizar_jugadores_que_pueden_hablar()
         
-        # Buscar el siguiente jugador que puede hablar
-        for _ in range(len(self.agents)):
-            self.agent_selection = self.agent_selector.next()
-            if self.puede_hablar(self.agent_selection):
-                return
-        
-        # Si nadie puede hablar, avanzar a la siguiente fase
-        if self.fase_actual in ["PARES", "JUEGO"]:
+        if not self.jugadores_que_pueden_hablar:
+            print(f"Nadie puede hablar en la fase {self.fase_actual}, avanzando...")
             self.avanzar_fase()
-        else:
-            # Si no estamos en PARES o JUEGO, restaurar el jugador actual
-            self.agent_selection = jugador_actual
+            return
+        
+        intentos = 0
+        while intentos < len(self.agents) * 2:
+            self.agent_selection = self.agent_selector.next()
+            if (self.agent_selection in self.jugadores_que_pueden_hablar and 
+                not self.dones.get(self.agent_selection, False)):
+                return
+            intentos += 1
+        
+        print(f"No se encontró jugador válido en fase {self.fase_actual}, avanzando...")
+        self.avanzar_fase()
     
     def es_del_mismo_equipo(self, jugador1, jugador2):
         """Determina si dos jugadores son del mismo equipo"""
-        return self.equipo_de_jugador[jugador1] == self.equipo_de_jugador[jugador2]
+        return self.equipo_de_jugador.get(jugador1) == self.equipo_de_jugador.get(jugador2)
     
     def step(self, action):
+        """Mejorar manejo de pasos y validaciones con delay"""
+        # Aplicar delay antes de procesar la acción
+        self.wait_for_action_delay()
+        
         agent = self.agent_selection
         
-        if self.dones[agent]:
+        if self.dones.get(agent, False):
             self._was_done_step(action)
             return
             
-        # Verificar que la acción es válida
         if not self.action_spaces[agent].contains(action):
             print(f"Acción inválida {action} para el agente {agent}")
             return
             
-        # Registrar la decisión del jugador
         self.registrar_decision(agent, action)
 
         if self.fase_actual == "MUS":
             if action in [2, 3]:  # Mus (2) o No Mus (3)
-                if agent not in [a for a, v in self.votos_mus]:
-                    self.votos_mus.append((agent, action))
-                    self.agent_selection = self.agent_selector.next()
-                    
-                    if len(self.votos_mus) == len(self.agents):
-                        votos = [v for a, v in self.votos_mus]
-                        if 3 in votos:  # Si alguien dijo No Mus
-                            self.fase_actual = "GRANDE"
-                            # Reiniciar el selector de agentes para la nueva fase
-                            self.agent_selector = agent_selector(self.agents)
-                            self.agent_selection = self.agent_selector.next()
-                            # Reiniciar control de apuestas
-                            self.apuesta_actual = 0
-                            self.equipo_apostador = None
-                            self.jugador_apostador = None
-                            self.ronda_completa = False
-                            self.jugadores_pasado = set()
-                        else:  # Todos dijeron Mus
+                if action == 3:  # No Mus
+                    self.fase_actual = "GRANDE"
+                    self.reiniciar_para_nueva_fase()
+                    return
+                else:  # Mus (2)
+                    # Verificar si ya votó
+                    if agent not in [a for a, v in self.votos_mus]:
+                        self.votos_mus.append((agent, action))
+                        
+                        if len(self.votos_mus) == len(self.agents):
+                            # Todos dijeron Mus
                             self.fase_actual = "DESCARTE"
                             self.cartas_a_descartar = {agent: [] for agent in self.agents}
-                        self.votos_mus = []
-                return
+                            self.votos_mus = []
+                            # CORRECCIÓN: Reiniciar selector de agentes para la fase de descarte
+                            self.agent_selector = agent_selector(self.agents)
+                            self.agent_selection = self.agent_selector.next()
+                            # Agregar control para saber quién ha confirmado su descarte
+                            self.jugadores_confirmaron_descarte = set()
+                            return
+                        else:
+                            self.agent_selection = self.agent_selector.next()
+                    return
 
         elif self.fase_actual == "DESCARTE":
-            if 11 <= action <= 14:  # Selección de cartas (ajustado por las nuevas acciones)
+            if 11 <= action <= 14:  # Selección de cartas
                 carta_idx = action - 11
                 if agent not in self.cartas_a_descartar:
                     self.cartas_a_descartar[agent] = []
@@ -310,64 +428,78 @@ class MusEnv(AECEnv):
                 return
 
             elif action == 4:  # Confirmar descarte
-                nuevas_cartas = []
-                for i in range(4):
-                    if i in self.cartas_a_descartar.get(agent, []):
-                        if self.mazo:
-                            nuevas_cartas.append(self.mazo.pop())
-                        else:
-                            nuevas_cartas.append(self.manos[agent][i])
-                    else:
-                        nuevas_cartas.append(self.manos[agent][i])
+                self.realizar_descarte(agent)
+                self.jugadores_confirmaron_descarte.add(agent)
                 
-                self.manos[agent] = nuevas_cartas
-                self.cartas_a_descartar[agent] = []
-                
-                # Actualizar declaraciones después del descarte
-                self.actualizar_declaraciones()
-                
-                self.agent_selection = self.agent_selector.next()
-                
-                # Verificar si todos han descartado
-                if all(len(self.cartas_a_descartar.get(ag, [])) == 0 for ag in self.agents):
-                    # Después del descarte, volver a la fase MUS
+                # Verificar si todos han confirmado su descarte
+                if len(self.jugadores_confirmaron_descarte) == len(self.agents):
                     self.fase_actual = "MUS"
-                    # Reiniciar el selector de agentes para la nueva fase
-                    self.agent_selector = agent_selector(self.agents)
+                    self.reiniciar_para_nueva_fase()
+                    # Limpiar el conjunto de confirmaciones
+                    self.jugadores_confirmaron_descarte = set()
+                else:
                     self.agent_selection = self.agent_selector.next()
                 return
             
         elif self.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
-            # Verificar si el jugador puede hablar en esta fase
-            if not self.puede_hablar(agent) and self.fase_actual in ["PARES", "JUEGO"]:
-                # Si no puede hablar, pasar al siguiente jugador que pueda
+            self.actualizar_jugadores_que_pueden_hablar()
+            
+            if agent not in self.jugadores_que_pueden_hablar:
                 self.siguiente_jugador_que_puede_hablar()
                 return
                 
-            # Procesar la acción según la lógica correcta de apuestas
             self.procesar_apuesta_corregida(self.fase_actual, agent, action)
                     
-        # Devolver observación actualizada
         return self.observe(self.agent_selection)
+
+    def reiniciar_para_nueva_fase(self):
+        """Función auxiliar para reiniciar estado entre fases"""
+        self.agent_selector = agent_selector(self.agents)
+        self.agent_selection = self.agent_selector.next()
+        self.apuesta_actual = 0
+        self.equipo_apostador = None
+        self.jugador_apostador = None
+        self.ronda_completa = False
+        self.jugadores_pasado = set()
+        self.jugadores_hablaron = set()
+        self.hay_ordago = False
+        self.actualizar_jugadores_que_pueden_hablar()
+        # Limpiar confirmaciones de descarte
+        if hasattr(self, 'jugadores_confirmaron_descarte'):
+            self.jugadores_confirmaron_descarte = set()
+
+    def realizar_descarte(self, agent):
+        """Mejorar lógica de descarte"""
+        if agent not in self.manos:
+            return
+            
+        nuevas_cartas = []
+        for i in range(4):
+            if i in self.cartas_a_descartar.get(agent, []):
+                if self.mazo:
+                    nuevas_cartas.append(self.mazo.pop())
+                else:
+                    self.generar_mazo()
+                    if self.mazo:
+                        nuevas_cartas.append(self.mazo.pop())
+                    else:
+                        nuevas_cartas.append(self.manos[agent][i])
+            else:
+                nuevas_cartas.append(self.manos[agent][i])
+        
+        self.manos[agent] = nuevas_cartas
+        self.cartas_a_descartar[agent] = []
+        self.actualizar_declaraciones()
         
     def registrar_decision(self, agent, action):
         """Registra la decisión tomada por un jugador"""
-        if action == 0:
-            self.ultima_decision[agent] = "Paso"
-        elif action == 1:
-            self.ultima_decision[agent] = "Envido"
-        elif action == 2:
-            self.ultima_decision[agent] = "Mus"
-        elif action == 3:
-            self.ultima_decision[agent] = "No Mus"
-        elif action == 4:
-            self.ultima_decision[agent] = "Confirmar"
-        elif action == 5:
-            self.ultima_decision[agent] = "No quiero"
-        elif action == 6:
-            self.ultima_decision[agent] = "Órdago"
-        elif action == 7:
-            self.ultima_decision[agent] = "Quiero"
+        decisiones = {
+            0: "Paso", 1: "Envido", 2: "Mus", 3: "No Mus", 4: "Confirmar",
+            5: "No quiero", 6: "Órdago", 7: "Quiero"
+        }
+        
+        if action in decisiones:
+            self.ultima_decision[agent] = decisiones[action]
         elif 11 <= action <= 14:
             carta_idx = action - 11
             if carta_idx in self.cartas_a_descartar.get(agent, []):
@@ -380,222 +512,241 @@ class MusEnv(AECEnv):
         if action not in self.acciones_validas[fase]:
             print(f"Acción {action} no válida para la fase {fase}")
             return
-            
-        # Si es la primera acción de la fase, reiniciar el control de apuestas
-        if self.apuesta_actual == 0 and self.equipo_apostador is None:
-            self.jugadores_pasado = set()
-            
-        # Procesar según la acción
+        
+        self.jugadores_hablaron.add(agent)
+        equipo_actual = self.equipo_de_jugador[agent]
+        
         if action == 0:  # Pasar
-            # Registrar que este jugador ha pasado
             self.jugadores_pasado.add(agent)
             
-            # Si hay una apuesta activa y todos los jugadores del equipo contrario han pasado
-            if self.apuesta_actual > 0 and self.equipo_apostador is not None:
-                equipo_contrario = "equipo_2" if self.equipo_apostador == "equipo_1" else "equipo_1"
-                jugadores_equipo_contrario = self.equipos[equipo_contrario]
-                
-                if all(jugador in self.jugadores_pasado for jugador in jugadores_equipo_contrario):
-                    # El equipo apostador gana la apuesta
-                    self.puntos_equipos[self.equipo_apostador] += self.apuesta_actual
-                    self.ganadores_fases[fase] = self.equipo_apostador
-                    
-                    # Avanzar a la siguiente fase
+            if self.jugadores_hablaron >= self.jugadores_que_pueden_hablar:
+                if self.apuesta_actual == 0:
+                    self.determinar_ganador_fase(fase)
                     self.avanzar_fase()
                     return
-            
-            # Si todos los jugadores han pasado sin que haya apuesta
-            if len(self.jugadores_pasado) == len(self.agents) and self.apuesta_actual == 0:
-                # Determinar el ganador de la fase por puntos
-                self.determinar_ganador_fase(fase)
-                
-                # Avanzar a la siguiente fase
-                self.avanzar_fase()
-                return
-                
-            # Pasar al siguiente jugador
-            self.agent_selection = self.agent_selector.next()
-            
-        elif action == 1:  # Envido
-            # Aumentar la apuesta
-            self.apuesta_actual += 1
-            
-            # Registrar quién ha apostado
-            self.jugador_apostador = agent
-            self.equipo_apostador = self.equipo_de_jugador[agent]
-            
-            # Reiniciar los jugadores que han pasado
-            self.jugadores_pasado = set()
-            
-            # Pasar al siguiente jugador
-            self.agent_selection = self.agent_selector.next()
-            
-        elif action == 5:  # No quiero
-            if self.apuesta_actual > 0 and self.equipo_apostador is not None:
-                # Verificar que el jugador es del equipo contrario al apostador
-                if not self.es_del_mismo_equipo(agent, self.jugador_apostador):
-                    # El equipo apostador gana la apuesta
-                    self.puntos_equipos[self.equipo_apostador] += self.apuesta_actual
-                    self.ganadores_fases[fase] = self.equipo_apostador
-                    
-                    # Avanzar a la siguiente fase
-                    self.avanzar_fase()
-                    return
-            
-            # Si no hay apuesta o el jugador es del mismo equipo, simplemente pasar turno
-            self.agent_selection = self.agent_selector.next()
-            
-        elif action == 6:  # Ordago
-            # Establecer una apuesta muy alta
-            self.apuesta_actual = 40
-            
-            # Registrar quién ha apostado
-            self.jugador_apostador = agent
-            self.equipo_apostador = self.equipo_de_jugador[agent]
-            
-            # Reiniciar los jugadores que han pasado
-            self.jugadores_pasado = set()
-            
-            # Pasar al siguiente jugador
-            self.agent_selection = self.agent_selector.next()
-            
-        elif action == 7:  # Quiero (capear)
-            if self.apuesta_actual > 0 and self.equipo_apostador is not None:
-                # Verificar que el jugador es del equipo contrario al apostador
-                if not self.es_del_mismo_equipo(agent, self.jugador_apostador):
-                    # Registrar que este jugador ha aceptado la apuesta
-                    self.jugadores_pasado.add(agent)
-                    
-                    # Verificar si todos los jugadores del equipo contrario han aceptado o pasado
+                elif self.equipo_apostador:
                     equipo_contrario = "equipo_2" if self.equipo_apostador == "equipo_1" else "equipo_1"
-                    jugadores_equipo_contrario = self.equipos[equipo_contrario]
+                    jugadores_equipo_contrario = set(self.equipos[equipo_contrario]) & self.jugadores_que_pueden_hablar
                     
-                    if all(jugador in self.jugadores_pasado for jugador in jugadores_equipo_contrario):
-                        # Determinar el ganador por puntos
-                        self.determinar_ganador_fase(fase)
-                        
-                        # Avanzar a la siguiente fase
+                    if jugadores_equipo_contrario.issubset(self.jugadores_pasado):
+                        self.puntos_equipos[self.equipo_apostador] += self.apuesta_actual
+                        self.apuestas[self.equipo_apostador][fase] = self.apuesta_actual
+                        self.ganadores_fases[fase] = self.equipo_apostador
                         self.avanzar_fase()
                         return
             
-            # Pasar al siguiente jugador
-            self.agent_selection = self.agent_selector.next()
+            self.siguiente_jugador_que_puede_hablar()
+        
+        elif action == 1:  # Envido
+            self.apuesta_actual += 2
+            self.jugador_apostador = agent
+            self.equipo_apostador = self.equipo_de_jugador[agent]
+            self.jugadores_pasado = set()
+            self.jugadores_hablaron = set()
+            self.jugadores_hablaron.add(agent)
+            self.siguiente_jugador_que_puede_hablar()
+        
+        elif action == 5:  # No quiero
+            if self.apuesta_actual > 0 and self.equipo_apostador is not None:
+                if equipo_actual != self.equipo_apostador:
+                    puntos_ganados = max(1, self.apuesta_actual - 1)
+                    self.puntos_equipos[self.equipo_apostador] += puntos_ganados
+                    self.apuestas[self.equipo_apostador][fase] = puntos_ganados
+                    self.ganadores_fases[fase] = self.equipo_apostador
+                    self.avanzar_fase()
+                    return
+            
+            self.siguiente_jugador_que_puede_hablar()
+        
+        elif action == 6:  # Ordago
+            self.apuesta_actual = 40
+            self.hay_ordago = True
+            self.jugador_apostador = agent
+            self.equipo_apostador = self.equipo_de_jugador[agent]
+            self.jugadores_pasado = set()
+            self.jugadores_hablaron = set()
+            self.jugadores_hablaron.add(agent)
+            self.siguiente_jugador_que_puede_hablar()
+        
+        elif action == 7:  # Quiero
+            if self.apuesta_actual > 0 and self.equipo_apostador is not None:
+                if equipo_actual != self.equipo_apostador:
+                    self.determinar_ganador_fase(fase)
+                    self.avanzar_fase()
+                    return
+            
+            self.siguiente_jugador_que_puede_hablar()
     
     def determinar_ganador_fase(self, fase):
         """Determina el ganador de una fase basado en los puntos"""
-        # Calcular los puntos de cada equipo en esta fase
+        jugadores_participantes = self.jugadores_que_pueden_hablar if self.jugadores_que_pueden_hablar else set(self.agents)
+        
         puntos_equipos = {"equipo_1": 0, "equipo_2": 0}
         
-        for agent in self.agents:
+        for agent in jugadores_participantes:
             equipo = self.equipo_de_jugador[agent]
             puntos = self.calcular_puntos(self.manos[agent], fase)
             
-            # En GRANDE y JUEGO, gana el que tiene más puntos
             if fase in ["GRANDE", "JUEGO"]:
                 if puntos > puntos_equipos[equipo]:
                     puntos_equipos[equipo] = puntos
-            # En CHICA, gana el que tiene menos puntos (pero no cero)
             elif fase == "CHICA":
                 if puntos_equipos[equipo] == 0 or (puntos > 0 and puntos < puntos_equipos[equipo]):
                     puntos_equipos[equipo] = puntos if puntos > 0 else 999
-            # En PARES, gana el que tiene mejor combinación
             elif fase == "PARES":
                 if puntos > puntos_equipos[equipo]:
                     puntos_equipos[equipo] = puntos
         
         # Determinar el equipo ganador
         if fase == "CHICA":
-            # En CHICA, gana el que tiene menos puntos
             if puntos_equipos["equipo_1"] == 999:
                 puntos_equipos["equipo_1"] = 0
             if puntos_equipos["equipo_2"] == 999:
                 puntos_equipos["equipo_2"] = 0
                 
             if puntos_equipos["equipo_1"] == 0 and puntos_equipos["equipo_2"] == 0:
-                # Si nadie tiene puntos, no hay ganador
                 self.ganadores_fases[fase] = None
             elif puntos_equipos["equipo_1"] == 0:
-                # Si equipo_1 no tiene puntos, gana equipo_2
                 self.ganadores_fases[fase] = "equipo_2"
-                self.puntos_equipos["equipo_2"] += 1
+                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
+                self.puntos_equipos["equipo_2"] += puntos_ganados
+                self.apuestas["equipo_2"][fase] = puntos_ganados
             elif puntos_equipos["equipo_2"] == 0:
-                # Si equipo_2 no tiene puntos, gana equipo_1
                 self.ganadores_fases[fase] = "equipo_1"
-                self.puntos_equipos["equipo_1"] += 1
+                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
+                self.puntos_equipos["equipo_1"] += puntos_ganados
+                self.apuestas["equipo_1"][fase] = puntos_ganados
             elif puntos_equipos["equipo_1"] < puntos_equipos["equipo_2"]:
                 self.ganadores_fases[fase] = "equipo_1"
-                self.puntos_equipos["equipo_1"] += 1
+                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
+                self.puntos_equipos["equipo_1"] += puntos_ganados
+                self.apuestas["equipo_1"][fase] = puntos_ganados
             elif puntos_equipos["equipo_2"] < puntos_equipos["equipo_1"]:
                 self.ganadores_fases[fase] = "equipo_2"
-                self.puntos_equipos["equipo_2"] += 1
+                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
+                self.puntos_equipos["equipo_2"] += puntos_ganados
+                self.apuestas["equipo_2"][fase] = puntos_ganados
             else:
-                # Empate, no hay ganador
                 self.ganadores_fases[fase] = None
+        elif fase == "JUEGO":
+            # Si nadie tiene juego (>=31), jugar al punto (quien se acerca más a 30)
+            if not any(self.declaraciones_juego.values()):
+                # Calcular diferencia respecto a 30 para cada jugador
+                diferencias = {}
+                for agent in jugadores_participantes:
+                    valor = self.calcular_valor_juego(self.manos[agent])
+                    diferencias[agent] = abs(30 - valor)
+                
+                # Encontrar la menor diferencia por equipo
+                min_diff_equipo1 = min(diferencias.get(a, 999) for a in self.equipos["equipo_1"] if a in jugadores_participantes)
+                min_diff_equipo2 = min(diferencias.get(a, 999) for a in self.equipos["equipo_2"] if a in jugadores_participantes)
+                
+                if min_diff_equipo1 < min_diff_equipo2:
+                    self.ganadores_fases[fase] = "equipo_1"
+                    puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
+                    self.puntos_equipos["equipo_1"] += puntos_ganados
+                    self.apuestas["equipo_1"][fase] = puntos_ganados
+                elif min_diff_equipo2 < min_diff_equipo1:
+                    self.ganadores_fases[fase] = "equipo_2"
+                    puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
+                    self.puntos_equipos["equipo_2"] += puntos_ganados
+                    self.apuestas["equipo_2"][fase] = puntos_ganados
+                else:
+                    self.ganadores_fases[fase] = None
+            else:
+                # Lógica original para cuando alguien tiene juego
+                if puntos_equipos["equipo_1"] > puntos_equipos["equipo_2"]:
+                    self.ganadores_fases[fase] = "equipo_1"
+                    puntos_adicionales = self.calcular_puntos_juego("equipo_1")
+                    puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
+                    self.puntos_equipos["equipo_1"] += puntos_ganados
+                    self.apuestas["equipo_1"][fase] = puntos_ganados
+                elif puntos_equipos["equipo_2"] > puntos_equipos["equipo_1"]:
+                    self.ganadores_fases[fase] = "equipo_2"
+                    puntos_adicionales = self.calcular_puntos_juego("equipo_2")
+                    puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
+                    self.puntos_equipos["equipo_2"] += puntos_ganados
+                    self.apuestas["equipo_2"][fase] = puntos_ganados
+                else:
+                    self.ganadores_fases[fase] = None
         else:
-            # En las demás fases, gana el que tiene más puntos
             if puntos_equipos["equipo_1"] > puntos_equipos["equipo_2"]:
                 self.ganadores_fases[fase] = "equipo_1"
-                self.puntos_equipos["equipo_1"] += 1
+                
+                if fase == "PARES":
+                    puntos_adicionales = self.calcular_puntos_pares("equipo_1")
+                elif fase == "JUEGO":
+                    puntos_adicionales = self.calcular_puntos_juego("equipo_1")
+                else:
+                    puntos_adicionales = 0
+                    
+                puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
+                self.puntos_equipos["equipo_1"] += puntos_ganados
+                self.apuestas["equipo_1"][fase] = puntos_ganados
+                
             elif puntos_equipos["equipo_2"] > puntos_equipos["equipo_1"]:
                 self.ganadores_fases[fase] = "equipo_2"
-                self.puntos_equipos["equipo_2"] += 1
+                
+                if fase == "PARES":
+                    puntos_adicionales = self.calcular_puntos_pares("equipo_2")
+                elif fase == "JUEGO":
+                    puntos_adicionales = self.calcular_puntos_juego("equipo_2")
+                else:
+                    puntos_adicionales = 0
+                    
+                puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
+                self.puntos_equipos["equipo_2"] += puntos_ganados
+                self.apuestas["equipo_2"][fase] = puntos_ganados
+                
             else:
-                # Empate, no hay ganador
                 self.ganadores_fases[fase] = None
+                
+        # Reiniciar la apuesta después de determinar el ganador
+        self.apuesta_actual = 0
+        self.equipo_apostador = None
+        self.jugador_apostador = None
+        self.hay_ordago = False
 
     def avanzar_fase(self):
         """Avanza a la siguiente fase del juego"""
         current_idx = self.fases.index(self.fase_actual)
         
-        # Determinar la siguiente fase de manera más segura
         if current_idx < len(self.fases) - 1:
-            # Por defecto, avanzamos a la siguiente fase
             next_idx = current_idx + 1
             next_fase = self.fases[next_idx]
             
-            # Lógica para saltar fases
             if next_fase == "PARES" and not any(self.declaraciones_pares.values()):
-                # Si nadie tiene pares, saltamos a JUEGO
                 if "JUEGO" in self.fases:
                     next_fase = "JUEGO"
                 else:
-                    # Si no hay fase JUEGO, saltamos a RECUENTO
                     next_fase = "RECUENTO"
             
             if next_fase == "JUEGO" and not any(self.declaraciones_juego.values()):
-                # Si nadie tiene juego, saltamos a RECUENTO
-                next_fase = "RECUENTO"
+                # Solo saltar si no hay cartas (caso extremo)
+                if all(not mano for mano in self.manos.values()):
+                    next_fase = "RECUENTO"
+                else:
+                    # Permitir jugar al punto aunque nadie tenga juego
+                    next_fase = "JUEGO"
                 
             self.fase_actual = next_fase
+            self.reiniciar_para_nueva_fase()
             
-            # Reiniciamos completamente el selector de agentes para la nueva fase
-            self.agent_selector = agent_selector(self.agents)
-            self.agent_selection = self.agent_selector.next()
-            
-            # Reiniciar control de apuestas para la nueva fase
-            self.apuesta_actual = 0
-            self.equipo_apostador = None
-            self.jugador_apostador = None
-            self.ronda_completa = False
-            self.jugadores_pasado = set()
+            if self.agent_selection not in self.jugadores_que_pueden_hablar:
+                self.siguiente_jugador_que_puede_hablar()
                 
-            # Si llegamos a la fase de RECUENTO, determinar el ganador
             if self.fase_actual == "RECUENTO":
                 self.determinar_ganador_global()
         else:
             self.fase_actual = "RECUENTO"
-            # Marcar el juego como terminado
             for agent in self.agents:
                 self.dones[agent] = True
-            # Determinar ganador final
             self.determinar_ganador_global()
 
     def determinar_ganador_global(self):
         """Determina el ganador final del juego"""
-        # El ganador es el equipo con más puntos
         equipo_ganador = max(self.puntos_equipos.items(), key=lambda x: x[1])[0]
         
-        # Asignar recompensa final a los jugadores del equipo ganador
         for agent in self.agents:
             if self.equipo_de_jugador[agent] == equipo_ganador:
                 self.rewards[agent] = sum(self.puntos_equipos.values())
@@ -606,6 +757,7 @@ class MusEnv(AECEnv):
 
     def render(self):
         print(f"Fase: {self.fase_actual}")
+        print(f"Jugadores que pueden hablar: {self.jugadores_que_pueden_hablar}")
         for ag in self.agents:
             print(f"{ag}: {self.manos[ag]} descarta {self.cartas_a_descartar.get(ag, [])}")
         if self.fase_actual == "MUS":
@@ -621,6 +773,56 @@ class MusEnv(AECEnv):
 
     def close(self):
         pass
+
+    def calcular_puntos_pares(self, equipo):
+        """Mejorar cálculo de puntos por pares"""
+        puntos_totales = 0
+        
+        for jugador in self.equipos.get(equipo, []):
+            if not self.declaraciones_pares.get(jugador, False):
+                continue
+                
+            if jugador not in self.manos:
+                continue
+                
+            mano = self.manos[jugador]
+            valores = [carta[0] for carta in mano]
+            conteo = {}
+            for valor in valores:
+                conteo[valor] = conteo.get(valor, 0) + 1
+            
+            if any(c == 4 for c in conteo.values()):
+                puntos_totales += 3
+            elif list(conteo.values()).count(2) >= 2:
+                puntos_totales += 3
+            elif any(c == 3 for c in conteo.values()):
+                puntos_totales += 2
+            elif any(c == 2 for c in conteo.values()):
+                puntos_totales += 1
+        
+        return max(1, puntos_totales)
+
+    def calcular_puntos_juego(self, equipo):
+        """Mejorar cálculo de puntos por juego"""
+        puntos_totales = 0
+        
+        for jugador in self.equipos.get(equipo, []):
+            if not self.declaraciones_juego.get(jugador, False):
+                continue
+                
+            if jugador not in self.valores_juego:
+                continue
+                
+            valor_juego = self.valores_juego[jugador]
+            
+            if valor_juego == 31:
+                puntos_totales += 3
+            elif valor_juego == 32:
+                puntos_totales += 2
+            else:
+                puntos_totales += 1
+        
+        return max(1, puntos_totales)
 
 def env():
     return MusEnv()
