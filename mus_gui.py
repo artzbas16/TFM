@@ -476,7 +476,7 @@ def main():
         Boton(830, 550, "Envido", 1),
         Boton(750, 550, "Mus", 2),
         Boton(750, 600, "No Mus", 3),
-        Boton(WIDTH - 150, 150, "OK", 4),
+        Boton(750, 550, "OK", 4),
         Boton(680, 600, "No quiero", 5),
         Boton(830, 600, "Órdago", 6),
         Boton(680, 550, "Quiero", 7),
@@ -570,15 +570,7 @@ def main():
                         action = 0  # Paso
                 elif mus_env.apuesta_actual > 0:
                     if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
-                        if puntos > 20:
-                            if random.random() > 0.7:
-                                action = 1  # Envido (subir)
-                            elif random.random() > 0.8:
-                                action = 6  # Órdago
-                            else:
-                                action = 7  # Quiero (capear)
-                        else:
-                            action = 5  # No quiero
+                        action = 7  # Quiero
                     else:
                         if puntos > 20 and random.random() > 0.7:
                             action = 1  # Envido (subir)
@@ -600,7 +592,7 @@ def main():
         
         draw_table()
         pygame.display.flip()
-        clock.tick(30)
+        clock.tick(60)
 
     pygame.quit()
     sys.exit()

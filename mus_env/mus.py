@@ -289,38 +289,111 @@ class MusEnv(AECEnv):
             time.sleep(self.action_delay - time_since_last_action)
         
         self.last_action_time = time.time()
+    
+    def calcular_valor_mano_grande(self, mano):
+        """Calcula el valor de una mano para GRANDE"""
+        if not mano:
+            return []
+        
+        # Jerarquía para GRANDE: Rey(12), Caballo(11), Sota(10), 7, 6, 5, 4, 3, 2, As(1)
+        jerarquia_grande = [12, 11, 10, 7, 6, 5, 4, 3, 2, 1]
+        
+        valores = [carta[0] for carta in mano]
+        conteo = {}
+        for valor in valores:
+            conteo[valor] = conteo.get(valor, 0) + 1
+        
+        # Crear lista de valores ordenados por jerarquía
+        resultado = []
+        for valor in jerarquia_grande:
+            if valor in conteo:
+                resultado.extend([valor] * conteo[valor])
+        
+        return resultado
+    
+    def calcular_valor_mano_chica(self, mano):
+        """Calcula el valor de una mano para CHICA"""
+        if not mano:
+            return []
+        
+        # Jerarquía para CHICA: As(1), 2, 3, 4, 5, 6, 7, Sota(10), Caballo(11), Rey(12)
+        jerarquia_chica = [1, 2, 3, 4, 5, 6, 7, 10, 11, 12]
+        
+        valores = [carta[0] for carta in mano]
+        conteo = {}
+        for valor in valores:
+            conteo[valor] = conteo.get(valor, 0) + 1
+        
+        # Crear lista de valores ordenados por jerarquía
+        resultado = []
+        for valor in jerarquia_chica:
+            if valor in conteo:
+                resultado.extend([valor] * conteo[valor])
+        
+        return resultado
+    
+    def comparar_manos(self, mano1, mano2, fase):
+        """Compara dos manos según la fase"""
+        if fase == "GRANDE":
+            valores1 = self.calcular_valor_mano_grande(mano1)
+            valores2 = self.calcular_valor_mano_grande(mano2)
+            for i in range(min(len(valores1), len(valores2))):
+                if valores1[i] > valores2[i]:
+                    return 1  # mano1 gana
+                elif valores1[i] < valores2[i]:
+                    return -1  # mano2 gana
+        elif fase == "CHICA":
+            valores1 = self.calcular_valor_mano_chica(mano1)
+            valores2 = self.calcular_valor_mano_chica(mano2)
+            for i in range(min(len(valores1), len(valores2))):
+                if valores1[i] < valores2[i]:
+                    return 1  # mano1 gana
+                elif valores1[i] > valores2[i]:
+                    return -1  # mano2 gana
+        else:
+            return 0
+        
+        print(valores1, valores2)
+        # Comparar carta por carta
+        
+        
+        # Si todas las cartas son iguales hasta aquí, comparar por longitud
+        if len(valores1) > len(valores2):
+            return 1
+        elif len(valores1) < len(valores2):
+            return -1
+        
+        return 0  # Empate
 
     def calcular_puntos(self, mano, fase):
-        """Mejorar cálculo de puntos"""
+        """Versión corregida de calcular_puntos que siempre devuelve un entero"""
         if not mano:
             return 0
             
-        valores = sorted([carta[0] for carta in mano], reverse=True)
-        
-        if fase == "GRANDE":
-            return sum(valores[:3])
-        elif fase == "CHICA":
-            return sum(sorted(valores)[:3])
-        elif fase == "PARES":
-            counts = {}
-            for v in valores:
-                counts[v] = counts.get(v, 0) + 1
-            
-            if any(c >= 4 for c in counts.values()):
-                return 6
-            elif any(c >= 3 for c in counts.values()):
-                return 3
-            elif list(counts.values()).count(2) >= 2:
-                return 2
-            elif any(c == 2 for c in counts.values()):
-                return 1
-            return 0
+        if fase == "PARES":
+            return self.calcular_puntos_pares_jugador(mano)
+                
         elif fase == "JUEGO":
-            valor_juego = self.calcular_valor_juego(mano)
-            if valor_juego >= 31:
-                return valor_juego
-            else:
-                return -(30 - valor_juego)
+            return self.calcular_valor_juego(mano)
+            
+        elif fase in ["GRANDE", "CHICA"]:
+            # Para GRANDE y CHICA, devolvemos un valor numérico simple para comparaciones
+            # Este método solo se usa para comparaciones básicas, no para determinar ganadores
+            # La determinación real de ganadores se hace en determinar_ganador_fase
+            if fase == "GRANDE":
+                valores = self.calcular_valor_mano_grande(mano)
+            else:  # CHICA
+                valores = self.calcular_valor_mano_chica(mano)
+            
+            # Convertir la lista de valores en un número para comparaciones simples
+            # Usamos un sistema de pesos para crear un valor único
+            valor_total = 0
+            for i, valor in enumerate(valores[:4]):  # Solo las primeras 4 cartas
+                valor_total += valor * (100 ** (3 - i))
+            
+            return valor_total
+        
+        return 0
 
     def calcular_valor_juego(self, mano):
         """Calcula el valor de la mano para juego"""
@@ -565,7 +638,7 @@ class MusEnv(AECEnv):
             self.siguiente_jugador_que_puede_hablar()
         
         elif action == 6:  # Ordago
-            self.apuesta_actual = 40
+            self.apuesta_actual = 30
             self.hay_ordago = True
             self.jugador_apostador = agent
             self.equipo_apostador = self.equipo_de_jugador[agent]
@@ -594,135 +667,227 @@ class MusEnv(AECEnv):
             
             self.siguiente_jugador_que_puede_hablar()
     
+    
     def determinar_ganador_fase(self, fase):
-        """Determina el ganador de una fase basado en los puntos"""
+        """Determina el ganador de una fase basado en las reglas del Mus"""
         jugadores_participantes = self.jugadores_que_pueden_hablar if self.jugadores_que_pueden_hablar else set(self.agents)
         
-        puntos_equipos = {"equipo_1": 0, "equipo_2": 0}
-        
-        for agent in jugadores_participantes:
-            equipo = self.equipo_de_jugador[agent]
-            puntos = self.calcular_puntos(self.manos[agent], fase)
+        if fase in ["GRANDE"]:
+            # Para GRANDE y CHICA, necesitamos comparar las mejores manos de cada equipo
+            mejor_mano_equipo1 = None
+            mejor_jugador_equipo1 = None
+            mejor_mano_equipo2 = None
+            mejor_jugador_equipo2 = None
             
-            if fase in ["GRANDE", "JUEGO"]:
-                if puntos > puntos_equipos[equipo]:
-                    puntos_equipos[equipo] = puntos
-            elif fase == "CHICA":
-                if puntos_equipos[equipo] == 0 or (puntos > 0 and puntos < puntos_equipos[equipo]):
-                    puntos_equipos[equipo] = puntos if puntos > 0 else 999
-            elif fase == "PARES":
-                if puntos > puntos_equipos[equipo]:
-                    puntos_equipos[equipo] = puntos
-        
-        # Determinar el equipo ganador
-        if fase == "CHICA":
-            if puntos_equipos["equipo_1"] == 999:
-                puntos_equipos["equipo_1"] = 0
-            if puntos_equipos["equipo_2"] == 999:
-                puntos_equipos["equipo_2"] = 0
+            # Encontrar la mejor mano de cada equipo
+            for agent in jugadores_participantes:
+                equipo = self.equipo_de_jugador[agent]
+                mano = self.manos[agent]
                 
-            if puntos_equipos["equipo_1"] == 0 and puntos_equipos["equipo_2"] == 0:
-                self.ganadores_fases[fase] = None
-            elif puntos_equipos["equipo_1"] == 0:
-                self.ganadores_fases[fase] = "equipo_2"
-                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
-                self.puntos_equipos["equipo_2"] += puntos_ganados
-                self.apuestas["equipo_2"][fase] = puntos_ganados
-            elif puntos_equipos["equipo_2"] == 0:
-                self.ganadores_fases[fase] = "equipo_1"
-                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
-                self.puntos_equipos["equipo_1"] += puntos_ganados
-                self.apuestas["equipo_1"][fase] = puntos_ganados
-            elif puntos_equipos["equipo_1"] < puntos_equipos["equipo_2"]:
-                self.ganadores_fases[fase] = "equipo_1"
-                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
-                self.puntos_equipos["equipo_1"] += puntos_ganados
-                self.apuestas["equipo_1"][fase] = puntos_ganados
-            elif puntos_equipos["equipo_2"] < puntos_equipos["equipo_1"]:
-                self.ganadores_fases[fase] = "equipo_2"
-                puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
-                self.puntos_equipos["equipo_2"] += puntos_ganados
-                self.apuestas["equipo_2"][fase] = puntos_ganados
+                if equipo == "equipo_1":
+                    if mejor_mano_equipo1 is None:
+                        mejor_mano_equipo1 = mano
+                        mejor_jugador_equipo1 = agent
+                    elif self.comparar_manos(mano, mejor_mano_equipo1, fase) > 0:
+                        mejor_mano_equipo1 = mano
+                        mejor_jugador_equipo1 = agent
+                else:  # equipo_2
+                    if mejor_mano_equipo2 is None:
+                        mejor_mano_equipo2 = mano
+                        mejor_jugador_equipo2 = agent
+                    elif self.comparar_manos(mano, mejor_mano_equipo2, fase) > 0:
+                        mejor_mano_equipo2 = mano
+                        mejor_jugador_equipo2 = agent
+            
+            # Comparar las mejores manos entre equipos
+            if mejor_mano_equipo1 is not None and mejor_mano_equipo2 is not None:
+                resultado = self.comparar_manos(mejor_mano_equipo1, mejor_mano_equipo2, fase)
+                if resultado > 0:
+                    equipo_ganador = "equipo_1"
+                elif resultado < 0:
+                    equipo_ganador = "equipo_2"
+                else:
+                    equipo_ganador = None  # Empate
+            elif mejor_mano_equipo1 is not None:
+                equipo_ganador = "equipo_1"
+            elif mejor_mano_equipo2 is not None:
+                equipo_ganador = "equipo_2"
             else:
-                self.ganadores_fases[fase] = None
+                equipo_ganador = None
+
+        elif fase in ["CHICA"]:
+            # Para GRANDE y CHICA, necesitamos comparar las mejores manos de cada equipo
+            mejor_mano_equipo1 = None
+            mejor_jugador_equipo1 = None
+            mejor_mano_equipo2 = None
+            mejor_jugador_equipo2 = None
+            
+            # Encontrar la mejor mano de cada equipo
+            for agent in jugadores_participantes:
+                equipo = self.equipo_de_jugador[agent]
+                mano = self.manos[agent]
+                
+                if equipo == "equipo_1":
+                    if mejor_mano_equipo1 is None:
+                        mejor_mano_equipo1 = mano
+                        mejor_jugador_equipo1 = agent
+                    elif self.comparar_manos(mano, mejor_mano_equipo1, fase) > 0:
+                        mejor_mano_equipo1 = mano
+                        mejor_jugador_equipo1 = agent
+                else:  # equipo_2
+                    if mejor_mano_equipo2 is None:
+                        mejor_mano_equipo2 = mano
+                        mejor_jugador_equipo2 = agent
+                    elif self.comparar_manos(mano, mejor_mano_equipo2, fase) > 0:
+                        mejor_mano_equipo2 = mano
+                        mejor_jugador_equipo2 = agent
+            
+            # Comparar las mejores manos entre equipos
+            if mejor_mano_equipo1 is not None and mejor_mano_equipo2 is not None:
+                resultado = self.comparar_manos(mejor_mano_equipo1, mejor_mano_equipo2, fase)
+                if resultado > 0:
+                    equipo_ganador = "equipo_1"
+                elif resultado < 0:
+                    equipo_ganador = "equipo_2"
+                else:
+                    equipo_ganador = None  # Empate
+            elif mejor_mano_equipo1 is not None:
+                equipo_ganador = "equipo_1"
+            elif mejor_mano_equipo2 is not None:
+                equipo_ganador = "equipo_2"
+            else:
+                equipo_ganador = None
+                
+        elif fase == "PARES":
+            # Para PARES, suma los puntos de pares de cada equipo
+            puntos_equipo1 = 0
+            puntos_equipo2 = 0
+            
+            for agent in jugadores_participantes:
+                if not self.declaraciones_pares.get(agent, False):
+                    continue
+                    
+                equipo = self.equipo_de_jugador[agent]
+                mano = self.manos[agent]
+                puntos_pares = self.calcular_puntos_pares_jugador(mano)
+                
+                if equipo == "equipo_1":
+                    puntos_equipo1 += puntos_pares
+                else:
+                    puntos_equipo2 += puntos_pares
+            
+            if puntos_equipo1 > puntos_equipo2:
+                equipo_ganador = "equipo_1"
+            elif puntos_equipo2 > puntos_equipo1:
+                equipo_ganador = "equipo_2"
+            else:
+                equipo_ganador = None
+                
         elif fase == "JUEGO":
-            # Si nadie tiene juego (>=31), jugar al punto (quien se acerca más a 30)
-            if not any(self.declaraciones_juego.values()):
-                # Calcular diferencia respecto a 30 para cada jugador
-                diferencias = {}
-                for agent in jugadores_participantes:
-                    valor = self.calcular_valor_juego(self.manos[agent])
-                    diferencias[agent] = abs(30 - valor)
+            # Para JUEGO, encontrar el mejor valor de cada equipo
+            mejor_valor_equipo1 = 0
+            mejor_valor_equipo2 = 0
+            hay_juego_equipo1 = False
+            hay_juego_equipo2 = False
+            
+            for agent in jugadores_participantes:
+                equipo = self.equipo_de_jugador[agent]
+                valor_juego = self.calcular_valor_juego(self.manos[agent])
+                tiene_juego = valor_juego >= 31
                 
-                # Encontrar la menor diferencia por equipo
-                min_diff_equipo1 = min(diferencias.get(a, 999) for a in self.equipos["equipo_1"] if a in jugadores_participantes)
-                min_diff_equipo2 = min(diferencias.get(a, 999) for a in self.equipos["equipo_2"] if a in jugadores_participantes)
-                
-                if min_diff_equipo1 < min_diff_equipo2:
-                    self.ganadores_fases[fase] = "equipo_1"
-                    puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
-                    self.puntos_equipos["equipo_1"] += puntos_ganados
-                    self.apuestas["equipo_1"][fase] = puntos_ganados
-                elif min_diff_equipo2 < min_diff_equipo1:
-                    self.ganadores_fases[fase] = "equipo_2"
-                    puntos_ganados = self.apuesta_actual if self.apuesta_actual > 0 else 1
-                    self.puntos_equipos["equipo_2"] += puntos_ganados
-                    self.apuestas["equipo_2"][fase] = puntos_ganados
+                if equipo == "equipo_1":
+                    if tiene_juego and (not hay_juego_equipo1 or valor_juego > mejor_valor_equipo1):
+                        mejor_valor_equipo1 = valor_juego
+                        hay_juego_equipo1 = True
+                    elif not hay_juego_equipo1 and valor_juego > mejor_valor_equipo1:
+                        mejor_valor_equipo1 = valor_juego
+                else:  # equipo_2
+                    if tiene_juego and (not hay_juego_equipo2 or valor_juego > mejor_valor_equipo2):
+                        mejor_valor_equipo2 = valor_juego
+                        hay_juego_equipo2 = True
+                    elif not hay_juego_equipo2 and valor_juego > mejor_valor_equipo2:
+                        mejor_valor_equipo2 = valor_juego
+            
+            # Si algún equipo tiene juego (>=31) y el otro no, gana el que tiene juego
+            if hay_juego_equipo1 and not hay_juego_equipo2:
+                equipo_ganador = "equipo_1"
+            elif hay_juego_equipo2 and not hay_juego_equipo1:
+                equipo_ganador = "equipo_2"
+            elif hay_juego_equipo1 and hay_juego_equipo2:
+                # Ambos tienen juego, gana el mayor
+                if mejor_valor_equipo1 > mejor_valor_equipo2:
+                    equipo_ganador = "equipo_1"
+                elif mejor_valor_equipo2 > mejor_valor_equipo1:
+                    equipo_ganador = "equipo_2"
                 else:
-                    self.ganadores_fases[fase] = None
+                    equipo_ganador = None
             else:
-                # Lógica original para cuando alguien tiene juego
-                if puntos_equipos["equipo_1"] > puntos_equipos["equipo_2"]:
-                    self.ganadores_fases[fase] = "equipo_1"
-                    puntos_adicionales = self.calcular_puntos_juego("equipo_1")
-                    puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
-                    self.puntos_equipos["equipo_1"] += puntos_ganados
-                    self.apuestas["equipo_1"][fase] = puntos_ganados
-                elif puntos_equipos["equipo_2"] > puntos_equipos["equipo_1"]:
-                    self.ganadores_fases[fase] = "equipo_2"
-                    puntos_adicionales = self.calcular_puntos_juego("equipo_2")
-                    puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
-                    self.puntos_equipos["equipo_2"] += puntos_ganados
-                    self.apuestas["equipo_2"][fase] = puntos_ganados
+                # Nadie tiene juego, se juega "al punto" (quien se acerca más a 30)
+                diff_equipo1 = abs(30 - mejor_valor_equipo1)
+                diff_equipo2 = abs(30 - mejor_valor_equipo2)
+                
+                if diff_equipo1 < diff_equipo2:
+                    equipo_ganador = "equipo_1"
+                elif diff_equipo2 < diff_equipo1:
+                    equipo_ganador = "equipo_2"
                 else:
-                    self.ganadores_fases[fase] = None
+                    equipo_ganador = None
         else:
-            if puntos_equipos["equipo_1"] > puntos_equipos["equipo_2"]:
-                self.ganadores_fases[fase] = "equipo_1"
-                
-                if fase == "PARES":
-                    puntos_adicionales = self.calcular_puntos_pares("equipo_1")
-                elif fase == "JUEGO":
-                    puntos_adicionales = self.calcular_puntos_juego("equipo_1")
-                else:
-                    puntos_adicionales = 0
-                    
-                puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
-                self.puntos_equipos["equipo_1"] += puntos_ganados
-                self.apuestas["equipo_1"][fase] = puntos_ganados
-                
-            elif puntos_equipos["equipo_2"] > puntos_equipos["equipo_1"]:
-                self.ganadores_fases[fase] = "equipo_2"
-                
-                if fase == "PARES":
-                    puntos_adicionales = self.calcular_puntos_pares("equipo_2")
-                elif fase == "JUEGO":
-                    puntos_adicionales = self.calcular_puntos_juego("equipo_2")
-                else:
-                    puntos_adicionales = 0
-                    
-                puntos_ganados = (self.apuesta_actual if self.apuesta_actual > 0 else 1) + puntos_adicionales
-                self.puntos_equipos["equipo_2"] += puntos_ganados
-                self.apuestas["equipo_2"][fase] = puntos_ganados
-                
+            equipo_ganador = None
+        
+        # Asignar puntos al equipo ganador
+        if equipo_ganador:
+            self.ganadores_fases[fase] = equipo_ganador
+            
+            # Calcular puntos ganados
+            if self.apuesta_actual > 0:
+                puntos_ganados = self.apuesta_actual
             else:
-                self.ganadores_fases[fase] = None
+                puntos_ganados = 1  # Puntos base
                 
-        # Reiniciar la apuesta después de determinar el ganador
+            # Agregar puntos adicionales según la fase
+            if fase == "PARES":
+                puntos_adicionales = self.calcular_puntos_pares(equipo_ganador)
+                puntos_ganados += puntos_adicionales
+            elif fase == "JUEGO":
+                puntos_adicionales = self.calcular_puntos_juego(equipo_ganador)
+                puntos_ganados += puntos_adicionales
+                
+            self.puntos_equipos[equipo_ganador] += puntos_ganados
+            self.apuestas[equipo_ganador][fase] = puntos_ganados
+            
+            print(f"Equipo {equipo_ganador} gana {puntos_ganados} puntos en {fase}")
+        else:
+            self.ganadores_fases[fase] = None
+            print(f"Empate en la fase {fase}")
+        
+        # Reiniciar variables de apuesta
         self.apuesta_actual = 0
         self.equipo_apostador = None
         self.jugador_apostador = None
         self.hay_ordago = False
+
+    def calcular_puntos_pares_jugador(self, mano):
+        """Calcula los puntos de pares para un jugador individual"""
+        if not mano:
+            return 0
+            
+        valores = [carta[0] for carta in mano]
+        conteo = {}
+        for valor in valores:
+            conteo[valor] = conteo.get(valor, 0) + 1
+        
+        # Contar diferentes tipos de pares
+        if any(c == 4 for c in conteo.values()):
+            return 6  # Cuatro iguales
+        elif any(c == 3 for c in conteo.values()):
+            return 3  # Tres iguales
+        elif list(conteo.values()).count(2) >= 2:
+            return 2  # Dos pares
+        elif any(c == 2 for c in conteo.values()):
+            return 1  # Un par
+        
+        return 0
 
     def avanzar_fase(self):
         """Avanza a la siguiente fase del juego"""
