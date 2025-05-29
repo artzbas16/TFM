@@ -10,6 +10,10 @@ class MusEnv(AECEnv):
 
     def __init__(self):
         super().__init__()
+        global fin, ronda_completa
+        fin = False
+        ronda_completa = False
+
         self.agents = [f"jugador_{i}" for i in range(4)]
         self.possible_agents = self.agents[:]
         self.agent_name_mapping = {agent: i for i, agent in enumerate(self.agents)}
@@ -121,7 +125,8 @@ class MusEnv(AECEnv):
         self.mazo = [(v, p) for p in range(4) for v in range(1, 13) if v not in [8, 9]]
         random.shuffle(self.mazo)
 
-    def reset(self, seed=75, options=None):
+    def reset(self, seed=None):
+        global fin, ronda_completa  # <-- Añade esta línea
         if seed is not None:
             random.seed(seed)
             
@@ -133,8 +138,14 @@ class MusEnv(AECEnv):
         self.declaraciones_juego = {}
         self.valores_juego = {}
         self.ultima_decision = {agent: "Esperando..." for agent in self.agents}
+        if fin:
+            self.partidas_ganadas = {"equipo_1": 0, "equipo_2": 0}
+            fin = False
 
-        self.puntos_equipos = {"equipo_1": 0, "equipo_2": 0}
+        if ronda_completa:
+            self.puntos_equipos = {"equipo_1": 0, "equipo_2": 0}
+            ronda_completa = False
+
         self.partida_terminada = False
         
         # Reiniciar control de apuestas
@@ -654,7 +665,10 @@ class MusEnv(AECEnv):
                 if equipo_ganador:
                     self.puntos_equipos[equipo_ganador] = 30  # Ganar la partida (30 puntos)
                     self.partidas_ganadas[equipo_ganador] += 1  # Registrar partida ganada
+                    print(self.partidas_ganadas[equipo_ganador])
                     self.partida_terminada = True
+                    self.hay_ordago = True
+                    self.determinar_ganador_global()
                     self.fase_actual = "RECUENTO"
                     for agent in self.agents:
                         self.dones[agent] = True
@@ -877,13 +891,14 @@ class MusEnv(AECEnv):
         for valor in valores:
             conteo[valor] = conteo.get(valor, 0) + 1
         
+        print(f"Conteo de valores: {conteo}")
         # Contar diferentes tipos de pares
         if any(c == 4 for c in conteo.values()):
-            return 6  # Cuatro iguales
+            return 3  # Cuatro iguales
         elif any(c == 3 for c in conteo.values()):
-            return 3  # Tres iguales
+            return 2  # Tres iguales
         elif list(conteo.values()).count(2) >= 2:
-            return 2  # Dos pares
+            return 3  # Dos pares
         elif any(c == 2 for c in conteo.values()):
             return 1  # Un par
         
@@ -918,9 +933,11 @@ class MusEnv(AECEnv):
                 self.siguiente_jugador_que_puede_hablar()
                 
             if self.fase_actual == "RECUENTO":
+                print("Avanzando a la fase de RECUENTO 1")
                 self.determinar_ganador_global()
         else:
             self.fase_actual = "RECUENTO"
+            print("Avanzando a la fase de RECUENTO 2")
             for agent in self.agents:
                 self.dones[agent] = True
             self.determinar_ganador_global()
@@ -928,24 +945,16 @@ class MusEnv(AECEnv):
     def determinar_ganador_global(self):
         """Determina el ganador de la partida actual y verifica si hay ganador del juego (mejor de 3)"""
         equipo_ganador_partida = max(self.puntos_equipos.items(), key=lambda x: x[1])[0]
-        self.partidas_ganadas[equipo_ganador_partida] += 1
-        
-        # Verificar si algún equipo ganó 2 partidas
-        if self.partidas_ganadas["equipo_1"] >= 2 or self.partidas_ganadas["equipo_2"] >= 2:
-            ganador_juego = max(self.partidas_ganadas.items(), key=lambda x: x[1])[0]
-            for agent in self.agents:
-                if self.equipo_de_jugador[agent] == ganador_juego:
-                    self.rewards[agent] = 100  # Recompensa alta por ganar el juego
-                else:
-                    self.rewards[agent] = -100
-        else:
-            # Si no hay ganador del juego, solo asignar recompensas por la partida
-            for agent in self.agents:
-                if self.equipo_de_jugador[agent] == equipo_ganador_partida:
-                    self.rewards[agent] = 30
-                else:
-                    self.rewards[agent] = -30
-        
+        global fin, ronda_completa
+        if self.puntos_equipos[equipo_ganador_partida] >= 30:
+            ronda_completa = True
+            if not self.hay_ordago:
+                self.partidas_ganadas[equipo_ganador_partida] += 1
+            self.hay_ordago = False
+            if self.partidas_ganadas[equipo_ganador_partida] >= 2:
+                fin = True
+
+        print(ronda_completa, fin, self.puntos_equipos[equipo_ganador_partida])
         return equipo_ganador_partida
 
     def render(self):

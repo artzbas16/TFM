@@ -142,6 +142,10 @@ def cargar_tapete():
 def draw_table():
     # Dibujar fondo de la mesa
     screen.blit(tapete_fondo, (0, 0))
+
+    if mus_env.partidas_ganadas["equipo_1"] >= 2 or mus_env.partidas_ganadas["equipo_2"] >= 2:
+        draw_final_final_screen()
+        return
     
     # En fase de recuento, mostrar todas las cartas y tabla centrada
     if mus_env.fase_actual == "RECUENTO":
@@ -302,13 +306,11 @@ def draw_table():
             screen.blit(texto, (WIDTH - 300, y_pos))
             y_pos += 30
 
-def draw_final_screen():
+def draw_final_final_screen():
     """Dibuja la pantalla final con todas las cartas visibles y la tabla de puntos centrada"""
     # Fondo semi-transparente
     overlay = pygame.Surface((WIDTH, HEIGHT))
-    overlay.set_alpha(200)
-    overlay.fill((0, 50, 0))
-    screen.blit(overlay, (0, 0))
+    screen.blit(tapete_fondo, (0, 0))
     
     # Título principal
     titulo = font_large.render("¡PARTIDA TERMINADA!", True, YELLOW)
@@ -431,7 +433,119 @@ def draw_final_screen():
     
     # Instrucciones
     instruccion = font.render("Presiona ESC para salir o ESPACIO para nueva partida", True, WHITE)
-    instruccion_rect = instruccion.get_rect(center=(WIDTH // 2, HEIGHT - 50))
+    instruccion_rect = instruccion.get_rect(center=(WIDTH // 2, HEIGHT - 150))
+    screen.blit(instruccion, instruccion_rect)
+
+def draw_final_screen():
+    """Dibuja la pantalla final con todas las cartas visibles y la tabla de puntos centrada"""
+    # Fondo semi-transparente
+    overlay = pygame.Surface((WIDTH, HEIGHT))
+    overlay.set_alpha(200)
+    overlay.fill((0, 50, 0))
+    screen.blit(overlay, (0, 0))
+    
+    # Título principal
+    titulo = font_large.render("¡RONDA TERMINADA!", True, YELLOW)
+    titulo_rect = titulo.get_rect(center=(WIDTH // 2, 50))
+    screen.blit(titulo, titulo_rect)
+    
+    # Mostrar todas las cartas de todos los jugadores
+    for i, agent in enumerate(mus_env.agents):
+        x, y = agent_positions[i]
+        
+        # Nombre del jugador y equipo
+        equipo = mus_env.equipo_de_jugador[agent]
+        nombre_texto = font.render(f"{agent} ({equipo})", True, equipo_colors[equipo])
+        
+        if i == 0:  # Jugador humano (abajo)
+            screen.blit(nombre_texto, (x - 120, y - 30))
+        elif i == 1:  # Jugador derecha
+            screen.blit(nombre_texto, (x - 180, y - 30))
+        elif i == 2:  # Jugador arriba
+            screen.blit(nombre_texto, (x - 120, y + 110))
+        elif i == 3:  # Jugador izquierda
+            screen.blit(nombre_texto, (x + 20, y - 30))
+        
+        # Mostrar todas las cartas boca arriba
+        if agent in mus_env.manos:
+            mano = mus_env.manos[agent]
+            for j, (valor, palo) in enumerate(mano):
+                img = cartas_img.get((valor, palo))
+                if img:
+                    screen.blit(img, (x - 120 + j * 70, y))
+    
+    # Tabla de puntos centrada
+    tabla_x = WIDTH // 2 - 250
+    tabla_y = HEIGHT // 2 - 100
+    tabla_ancho = 500
+    tabla_alto = 200
+    
+    # Fondo de la tabla
+    pygame.draw.rect(screen, (40, 40, 40), (tabla_x - 10, tabla_y - 10, tabla_ancho + 20, tabla_alto + 20))
+    pygame.draw.rect(screen, WHITE, (tabla_x, tabla_y, tabla_ancho, tabla_alto), 3)
+    
+    # Título de la tabla
+    titulo_tabla = font_large.render("PUNTUACIÓN", True, YELLOW)
+    titulo_rect = titulo_tabla.get_rect(center=(WIDTH // 2, tabla_y - 30))
+    screen.blit(titulo_tabla, titulo_rect)
+    
+    # Encabezados
+    header_y = tabla_y + 20
+    pygame.draw.line(screen, WHITE, (tabla_x, header_y + 30), (tabla_x + tabla_ancho, header_y + 30), 2)
+    
+    encabezados = ["FASE", "EQUIPO 1", "EQUIPO 2"]
+    col_width = tabla_ancho // 3
+    
+    for i, encabezado in enumerate(encabezados):
+        texto = font.render(encabezado, True, WHITE)
+        texto_rect = texto.get_rect(center=(tabla_x + col_width * i + col_width // 2, header_y + 15))
+        screen.blit(texto, texto_rect)
+    
+    # Filas de datos
+    fases = ["GRANDE", "CHICA", "PARES", "JUEGO"]
+    for row, fase in enumerate(fases):
+        row_y = header_y + 50 + row * 30
+        
+        # Nombre de la fase
+        fase_texto = font.render(fase, True, WHITE)
+        fase_rect = fase_texto.get_rect(center=(tabla_x + col_width // 2, row_y))
+        screen.blit(fase_texto, fase_rect)
+        
+        # Puntos equipo 1
+        puntos_eq1 = mus_env.apuestas["equipo_1"][fase] if hasattr(mus_env, 'apuestas') and "equipo_1" in mus_env.apuestas else 0
+        eq1_texto = font.render(str(puntos_eq1), True, equipo_colors["equipo_1"])
+        eq1_rect = eq1_texto.get_rect(center=(tabla_x + col_width + col_width // 2, row_y))
+        screen.blit(eq1_texto, eq1_rect)
+        
+        # Puntos equipo 2
+        puntos_eq2 = mus_env.apuestas["equipo_2"][fase] if hasattr(mus_env, 'apuestas') and "equipo_2" in mus_env.apuestas else 0
+        eq2_texto = font.render(str(puntos_eq2), True, equipo_colors["equipo_2"])
+        eq2_rect = eq2_texto.get_rect(center=(tabla_x + col_width * 2 + col_width // 2, row_y))
+        screen.blit(eq2_texto, eq2_rect)
+    
+    # Línea de separación para totales
+    total_y = header_y + 50 + len(fases) * 30
+    pygame.draw.line(screen, WHITE, (tabla_x, total_y), (tabla_x + tabla_ancho, total_y), 2)
+    
+    # Totales
+    total_eq1 = mus_env.puntos_equipos["equipo_1"]
+    total_eq2 = mus_env.puntos_equipos["equipo_2"]
+    
+    total_texto = font_large.render("TOTAL", True, YELLOW)
+    total_rect = total_texto.get_rect(center=(tabla_x + col_width // 2, total_y + 25))
+    screen.blit(total_texto, total_rect)
+    
+    total1_texto = font_large.render(str(total_eq1), True, equipo_colors["equipo_1"])
+    total1_rect = total1_texto.get_rect(center=(tabla_x + col_width + col_width // 2, total_y + 25))
+    screen.blit(total1_texto, total1_rect)
+    
+    total2_texto = font_large.render(str(total_eq2), True, equipo_colors["equipo_2"])
+    total2_rect = total2_texto.get_rect(center=(tabla_x + col_width * 2 + col_width // 2, total_y + 25))
+    screen.blit(total2_texto, total2_rect)
+    
+    # Instrucciones
+    instruccion = font.render("Presiona ESC para salir o ESPACIO para siguiente ronda", True, WHITE)
+    instruccion_rect = instruccion.get_rect(center=(WIDTH // 2, HEIGHT - 150))
     screen.blit(instruccion, instruccion_rect)
 
 def botones_visibles(fase_actual, jugador_actual):
@@ -497,7 +611,6 @@ def main():
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_SPACE and mus_env.fase_actual == "RECUENTO":
-                    # Nueva partida
                     mus_env.reset()
             
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -572,17 +685,10 @@ def main():
                     if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
                         action = 7  # Quiero
                     else:
-                        if puntos > 20 and random.random() > 0.7:
-                            action = 1  # Envido (subir)
-                        else:
-                            action = 0  # Paso
-                else:
-                    if puntos > 20 and random.random() > 0.5:
-                        action = 1  # Envido
-                    elif puntos > 25 and random.random() > 0.8:
-                        action = 6  # Órdago
-                    else:
                         action = 0  # Paso
+                else:
+                    
+                    action = 0  # Paso
                 
                 mus_env.step(action)
         
