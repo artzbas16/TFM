@@ -161,6 +161,7 @@ class MusEnv(AECEnv):
         self.agents = self.possible_agents[:]
         self.agent_selector = agent_selector(self.agents)
         self.agent_selection = self.agent_selector.next()
+        print(f"Agente seleccionado: {self.agent_selection}")
         
         self.repartir_cartas()
         self.dones = {agent: False for agent in self.agents}
@@ -441,7 +442,6 @@ class MusEnv(AECEnv):
     def siguiente_jugador_que_puede_hablar(self):
         """Mejorar búsqueda del siguiente jugador"""
         self.actualizar_jugadores_que_pueden_hablar()
-        
         if not self.jugadores_que_pueden_hablar:
             print(f"Nadie puede hablar en la fase {self.fase_actual}, avanzando...")
             self.avanzar_fase()
@@ -466,8 +466,8 @@ class MusEnv(AECEnv):
         """Mejorar manejo de pasos y validaciones con delay"""
         # Aplicar delay antes de procesar la acción
         self.wait_for_action_delay()
-        
         agent = self.agent_selection
+        print(f"step - Agent: {agent}, Action: {action}, Fase: {self.fase_actual}")
         
         if self.dones.get(agent, False):
             self._was_done_step(action)
@@ -478,7 +478,7 @@ class MusEnv(AECEnv):
             return
             
         self.registrar_decision(agent, action)
-
+        
         if self.fase_actual == "MUS":
             if action in [2, 3]:  # Mus (2) o No Mus (3)
                 if action == 3:  # No Mus
@@ -500,9 +500,14 @@ class MusEnv(AECEnv):
                             self.agent_selection = self.agent_selector.next()
                             # Agregar control para saber quién ha confirmado su descarte
                             self.jugadores_confirmaron_descarte = set()
+                            print(f"Cambiando a DESCARTE - Nuevo agente: {self.agent_selection}")
                             return
                         else:
+                            # Pasar al siguiente jugador
+                            old_agent = self.agent_selection
                             self.agent_selection = self.agent_selector.next()
+                            print(f"Siguiente jugador en MUS: {old_agent} -> {self.agent_selection}")
+                            return
                     return
 
         elif self.fase_actual == "DESCARTE":
@@ -515,6 +520,7 @@ class MusEnv(AECEnv):
                     self.cartas_a_descartar[agent].remove(carta_idx)
                 else:
                     self.cartas_a_descartar[agent].append(carta_idx)
+                # No cambiar de agente aquí, el jugador sigue seleccionando
                 return
 
             elif action == 4:  # Confirmar descarte
@@ -523,12 +529,16 @@ class MusEnv(AECEnv):
                 
                 # Verificar si todos han confirmado su descarte
                 if len(self.jugadores_confirmaron_descarte) == len(self.agents):
-                    self.fase_actual = "MUS"
+                    self.fase_actual = "MUS"  # ¿O debería ser "GRANDE"?
                     self.reiniciar_para_nueva_fase()
                     # Limpiar el conjunto de confirmaciones
                     self.jugadores_confirmaron_descarte = set()
+                    print(f"Todos confirmaron descarte - Nueva fase: {self.fase_actual}")
                 else:
+                    # Pasar al siguiente jugador
+                    old_agent = self.agent_selection
                     self.agent_selection = self.agent_selector.next()
+                    print(f"Siguiente jugador en DESCARTE: {old_agent} -> {self.agent_selection}")
                 return
             
         elif self.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
@@ -539,6 +549,8 @@ class MusEnv(AECEnv):
                 return
                 
             self.procesar_apuesta_corregida(self.fase_actual, agent, action)
+            # Después de procesar apuesta, verificar si necesitamos cambiar de agente
+            # Esto debería manejarse dentro de procesar_apuesta_corregida
                     
         return self.observe(self.agent_selection)
 
@@ -907,7 +919,6 @@ class MusEnv(AECEnv):
     def avanzar_fase(self):
         """Avanza a la siguiente fase del juego"""
         current_idx = self.fases.index(self.fase_actual)
-        
         if current_idx < len(self.fases) - 1:
             next_idx = current_idx + 1
             next_fase = self.fases[next_idx]

@@ -50,6 +50,17 @@ PURPLE = (128, 0, 128)
 LIGHT_GRAY = (220, 220, 220)
 DARK_GREEN = (0, 100, 0)
 
+acciones = {
+    0: "Paso",
+    1: "Envido",
+    2: "Mus",
+    3: "No Mus",
+    4: "OK",
+    5: "No quiero",
+    6: "Órdago",
+    7: "Quiero"
+}
+
 # Cargar entorno
 mus_env = mus.env()
 mus_env.reset()
@@ -138,6 +149,34 @@ def cargar_tapete():
         tapete = pygame.Surface((WIDTH, HEIGHT))
         tapete.fill(DARK_GREEN)
         return tapete
+    
+def draw_step(agent, accion):
+    """Resalta el jugador actual y muestra su última decisión"""
+    if agent not in mus_env.agents:
+        return
+        
+    i = mus_env.agents.index(agent)
+    x, y = agent_positions[i]
+    
+    # Solo dibujar si no está en fase de recuento y no está "done"
+    if not mus_env.dones.get(agent, False) and mus_env.fase_actual != "RECUENTO":
+        # Marco naranja más visible
+        pygame.draw.rect(screen, ORANGE, (x - 140, y - 20, 310, 140), 4)
+        pygame.draw.rect(screen, YELLOW, (x - 135, y - 15, 300, 130), 2)
+        
+        # Mostrar decisión del jugador actual
+        decision = acciones.get(accion, "Desconocida")
+        decision_texto = font_small.render(f"Decisión: {decision}", True, ORANGE)
+        
+        # Posicionamiento según la posición del jugador
+        if i == 0:  # Jugador humano (abajo)
+            screen.blit(decision_texto, (x - 120, y - 35))
+        elif i == 1:  # Jugador derecha
+            screen.blit(decision_texto, (x - 180, y - 70))
+        elif i == 2:  # Jugador arriba
+            screen.blit(decision_texto, (x - 120, y + 120))
+        elif i == 3:  # Jugador izquierda
+            screen.blit(decision_texto, (x + 20, y - 70))
 
 def draw_table():
     # Dibujar fondo de la mesa
@@ -188,22 +227,8 @@ def draw_table():
     # Dibujar cartas de los jugadores y marcar al jugador actual
     for i, agent in enumerate(mus_env.agents):
         x, y = agent_positions[i]
-        
         # CORRECCIÓN: Dibujar un marco alrededor del jugador actual con mejor lógica
-        if agent == mus_env.agent_selection and not mus_env.dones.get(agent, False):
-            # Marco naranja más visible
-            pygame.draw.rect(screen, ORANGE, (x - 140, y - 20, 310, 140), 4)
-            pygame.draw.rect(screen, YELLOW, (x - 135, y - 15, 300, 130), 2)
-            # Mostrar decisión del jugador actual
-            decision_texto = font_small.render(f"Decisión: {mus_env.ultima_decision[agent]}", True, ORANGE)
-            if i == 0:  # Jugador humano (abajo)
-                screen.blit(decision_texto, (x - 120, y - 35))
-            elif i == 1:  # Jugador derecha
-                screen.blit(decision_texto, (x - 180, y - 70))
-            elif i == 2:  # Jugador arriba
-                screen.blit(decision_texto, (x - 120, y + 120))
-            elif i == 3:  # Jugador izquierda
-                screen.blit(decision_texto, (x + 20, y - 70))
+        
         
         # Mostrar el equipo al que pertenece cada jugador
         equipo = mus_env.equipo_de_jugador[agent]
@@ -601,6 +626,50 @@ def main():
     jugador_humano = "jugador_0"
 
     while running:
+        # Lógica de IA con delay automático (solo si no es fase de recuento)
+        current_agent = mus_env.agent_selection
+        if current_agent != jugador_humano and mus_env.fase_actual != "RECUENTO" and not mus_env.dones.get(current_agent, False):
+            # Verificar si el jugador puede hablar en esta fase
+            if mus_env.fase_actual in ["PARES", "JUEGO"] and current_agent not in mus_env.jugadores_que_pueden_hablar:
+                mus_env.siguiente_jugador_que_puede_hablar()
+                continue
+            
+            if mus_env.fase_actual == "MUS":
+                # IA decide entre Mus y No Mus
+                if random.random() > 0.8:  # 20% probabilidad de decir "No Mus"
+                    action = 3  # No Mus
+                else:
+                    action = 2  # Mus
+
+            elif mus_env.fase_actual == "DESCARTE":
+                if current_agent not in mus_env.cartas_a_descartar or not mus_env.cartas_a_descartar[current_agent]:
+                    num_descartes = random.randint(0, 2)
+                    descartes = random.sample(range(4), num_descartes) if num_descartes > 0 else []
+                    mus_env.cartas_a_descartar[current_agent] = descartes
+                action = 4
+
+            elif mus_env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
+                puntos = mus_env.calcular_puntos(mus_env.manos[current_agent], mus_env.fase_actual)
+                
+                # Lógica de IA mejorada para las fases de apuestas
+                if hasattr(mus_env, 'hay_ordago') and mus_env.hay_ordago:
+                    if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
+                        action = 7  # Quiero (capear)
+                    else:
+                        action = 0  # Paso
+                elif mus_env.apuesta_actual > 0:
+                    if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
+                        action = 1  # Envido (subir)
+                    else:
+                        action = 0  # Paso
+                else:
+                    
+                    action = 0  # Paso
+            
+            draw_step(current_agent, action)
+            pygame.display.flip() 
+            mus_env.step(action)
+
         mouse_pos = pygame.mouse.get_pos()
 
         for event in pygame.event.get():
@@ -648,50 +717,6 @@ def main():
                             if carta_rect.collidepoint(mouse_pos):
                                 mus_env.step(11 + j)
                                 break
-        
-        # Lógica de IA con delay automático (solo si no es fase de recuento)
-        current_agent = mus_env.agent_selection
-        if current_agent != jugador_humano and mus_env.fase_actual != "RECUENTO":
-            # Verificar si el jugador puede hablar en esta fase
-            if mus_env.fase_actual in ["PARES", "JUEGO"] and current_agent not in mus_env.jugadores_que_pueden_hablar:
-                mus_env.siguiente_jugador_que_puede_hablar()
-                continue
-            
-            if mus_env.fase_actual == "MUS":
-                # IA decide entre Mus y No Mus
-                if random.random() > 0.8:  # 20% probabilidad de decir "No Mus"
-                    action = 3  # No Mus
-                else:
-                    action = 2  # Mus
-                mus_env.step(action)
-
-            elif mus_env.fase_actual == "DESCARTE":
-                if current_agent not in mus_env.cartas_a_descartar or not mus_env.cartas_a_descartar[current_agent]:
-                    num_descartes = random.randint(0, 2)
-                    descartes = random.sample(range(4), num_descartes) if num_descartes > 0 else []
-                    mus_env.cartas_a_descartar[current_agent] = descartes
-                mus_env.step(4)  # Confirmar descarte
-
-            elif mus_env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
-                puntos = mus_env.calcular_puntos(mus_env.manos[current_agent], mus_env.fase_actual)
-                
-                # Lógica de IA mejorada para las fases de apuestas
-                if hasattr(mus_env, 'hay_ordago') and mus_env.hay_ordago:
-                    if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
-                        action = 7  # Quiero (capear)
-                    else:
-                        action = 0  # Paso
-                elif mus_env.apuesta_actual > 0:
-                    if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
-                        action = 7  # Quiero
-                    else:
-                        action = 0  # Paso
-                else:
-                    
-                    action = 0  # Paso
-                
-                mus_env.step(action)
-        
         # Actualizar estado visual de los botones (hover)
         for boton in botones:
             boton.actualizar_estado(mouse_pos)
