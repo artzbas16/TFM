@@ -204,25 +204,43 @@ def draw_table():
     turno_texto = font.render(f"Turno de: {mus_env.agent_selection}", True, WHITE)
     screen.blit(turno_texto, (20, 40))
     
-    # Mostrar puntos de los equipos
-    equipo1_texto = font.render(f"Equipo 1 (0,2): {mus_env.puntos_equipos['equipo_1']}", True, equipo_colors["equipo_1"])
-    screen.blit(equipo1_texto, (20, 70))
-    
-    equipo2_texto = font.render(f"Equipo 2 (1,3): {mus_env.puntos_equipos['equipo_2']}", True, equipo_colors["equipo_2"])
-    screen.blit(equipo2_texto, (20, 100))
-    
+    # Mostrar tabla de apuestas
+    # Rectángulo de fondo
+    pygame.draw.rect(screen, (40, 40, 40), (15, 85, 150, 160))
+    pygame.draw.rect(screen, WHITE, (20, 90, 140, 150), 2)
+
+    # Líneas horizontales ajustadas al nuevo ancho
+    pygame.draw.line(screen, WHITE, (20, 120), (160, 120), 1)
+    pygame.draw.line(screen, WHITE, (20, 150), (160, 150), 1)
+    pygame.draw.line(screen, WHITE, (20, 180), (160, 180), 1)
+    pygame.draw.line(screen, WHITE, (20, 210), (160, 210), 1)
+
+    # Encabezado
+    header = font_small.render("Apuestas", True, YELLOW)
+    screen.blit(header, (50, 95))
+
+    # Filas de datos
+    fases = ["Grande", "Chica", "Pares", "Juego"]
+    for i, fase in enumerate(fases):
+        # Nombre de la fase
+        fase_text = font_small.render(fase, True, WHITE)
+        screen.blit(fase_text, (30, 125 + i * 30))
+        
+        # Puntos (suma de ambos equipos)
+        puntos_eq1 = mus_env.apuestas["equipo_1"][fase.upper()] if hasattr(mus_env, 'apuestas') and "equipo_1" in mus_env.apuestas and fase.upper() in mus_env.apuestas["equipo_1"] else 0
+        puntos_eq2 = mus_env.apuestas["equipo_2"][fase.upper()] if hasattr(mus_env, 'apuestas') and "equipo_2" in mus_env.apuestas and fase.upper() in mus_env.apuestas["equipo_2"] else 0
+        puntos_text = font_small.render(str(puntos_eq1 + puntos_eq2), True, YELLOW)
+        screen.blit(puntos_text, (100, 125 + i * 30))
+        
     # Mostrar apuesta actual si hay una
     if mus_env.apuesta_actual > 0:
-        apuesta_texto = font.render(f"Apuesta actual: {mus_env.apuesta_actual}", True, YELLOW)
-        screen.blit(apuesta_texto, (20, 130))
-        
         if mus_env.equipo_apostador:
-            apostador_texto = font.render(f"Equipo apostador: {mus_env.equipo_apostador}", True, equipo_colors[mus_env.equipo_apostador])
-            screen.blit(apostador_texto, (20, 160))
+            apostador_texto = font.render(str(mus_env.apuesta_actual), True, equipo_colors[mus_env.equipo_apostador])
+            screen.blit(apostador_texto, (130, 90))
             
         if hasattr(mus_env, 'hay_ordago') and mus_env.hay_ordago:
             ordago_texto = font.render("¡ÓRDAGO EN JUEGO!", True, RED)
-            screen.blit(ordago_texto, (20, 190))
+            screen.blit(ordago_texto, (50, 230))
 
     # Dibujar cartas de los jugadores y marcar al jugador actual
     for i, agent in enumerate(mus_env.agents):
@@ -320,16 +338,6 @@ def draw_table():
                 texto_valor = font.render(f"Valor de tu mano: {valor_juego}", True, WHITE)
                 screen.blit(texto_valor, (WIDTH // 2 - 100, HEIGHT - 180))
 
-    # Mostrar ganadores de cada fase
-    y_pos = 120
-    for fase, ganador in mus_env.ganadores_fases.items():
-        if ganador:
-            texto = font.render(
-                f"{fase}: Ganador -> {ganador}", 
-                True, equipo_colors[ganador]
-            )
-            screen.blit(texto, (WIDTH - 300, y_pos))
-            y_pos += 30
 
 def draw_final_final_screen():
     """Dibuja la pantalla final con todas las cartas visibles y la tabla de puntos centrada"""
