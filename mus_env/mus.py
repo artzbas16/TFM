@@ -13,6 +13,7 @@ class MusEnv(AECEnv):
         global fin, ronda_completa
         fin = False
         ronda_completa = False
+        self.mano = 0
 
         self.agents = [f"jugador_{i}" for i in range(4)]
         self.possible_agents = self.agents[:]
@@ -120,6 +121,8 @@ class MusEnv(AECEnv):
         self.action_delay = 1.0  # 1 segundo de delay
         self.last_action_time = 0
 
+        self.primera_ronda = True  # Nuevo: control de primera ronda
+
     def generar_mazo(self):
         """Generar mazo correctamente sin 8s y 9s"""
         self.mazo = [(v, p) for p in range(4) for v in range(1, 13) if v not in [8, 9]]
@@ -159,6 +162,7 @@ class MusEnv(AECEnv):
         self.hay_ordago = False
         
         self.agents = self.possible_agents[:]
+        self.agents = self.agents[self.mano:] + self.agents[:self.mano]
         self.agent_selector = agent_selector(self.agents)
         self.agent_selection = self.agent_selector.next()
         print(f"Agente seleccionado: {self.agent_selection}")
@@ -220,6 +224,14 @@ class MusEnv(AECEnv):
         """Mejorar la lógica de quién puede hablar"""
         self.jugadores_que_pueden_hablar = set()
         self.equipos_que_pueden_hablar = set()
+
+        if self.hay_ordago and self.equipo_apostador:
+            equipo_contrario = "equipo_2" if self.equipo_apostador == "equipo_1" else "equipo_1"
+            for agent in self.agents:
+                if self.equipo_de_jugador[agent] == equipo_contrario:
+                    self.jugadores_que_pueden_hablar.add(agent)
+                    self.equipos_que_pueden_hablar.add(equipo_contrario)
+            return
         
         if self.fase_actual == "PARES":
             for agent in self.agents:
@@ -259,21 +271,29 @@ class MusEnv(AECEnv):
         elif self.fase_actual in ["PARES", "JUEGO"] and len(self.equipos_que_pueden_hablar) == 0:
             print(f"Nadie puede hablar en {self.fase_actual}, avanzando...")
             self.avanzar_fase()
+        
+        elif not self.jugadores_que_pueden_hablar:
+            print(f"No hay jugadores que puedan hablar en {self.fase_actual}, avanzando...")
+            self.avanzar_fase()
 
     def observe(self, agent):
-        """Verificar que el agente existe en las manos"""
-        if agent not in self.manos:
-            return {
-                "cartas": np.zeros((self.hand_size, 2), dtype=np.int8),
-                "fase": self.fases.index(self.fase_actual),
-                "turno": self.agent_name_mapping.get(self.agent_selection, 0)
-            }
-        
-        return {
-            "cartas": np.array(self.manos[agent], dtype=np.int8),
+        """Mejorar observación con información del juego"""
+        obs = {
+            "cartas": np.zeros((self.hand_size, 2), dtype=np.int8),
             "fase": self.fases.index(self.fase_actual),
             "turno": self.agent_name_mapping.get(self.agent_selection, 0)
         }
+        
+        if agent in self.manos:
+            obs["cartas"] = np.array(self.manos[agent], dtype=np.int8)
+        
+        # Añadir información adicional
+        obs["apuesta_actual"] = self.apuesta_actual
+        obs["equipo_apostador"] = 0
+        if self.equipo_apostador:
+            obs["equipo_apostador"] = 1 if self.equipo_apostador == "equipo_1" else 2
+        
+        return obs
     
     def _was_done_step(self, action):
         """Mejorar manejo de agentes terminados"""
@@ -293,13 +313,13 @@ class MusEnv(AECEnv):
             self.rewards[self.agent_selection] = 0
 
     def wait_for_action_delay(self):
-        """Esperar el tiempo necesario entre acciones"""
-        current_time = time.time()
-        time_since_last_action = current_time - self.last_action_time
-        
+        if self.fase_actual == "RECUENTO":
+            return 
+
+        now = time.time()
+        time_since_last_action = now - self.last_action_time
         if time_since_last_action < self.action_delay:
             time.sleep(self.action_delay - time_since_last_action)
-        
         self.last_action_time = time.time()
     
     def calcular_valor_mano_grande(self, mano):
@@ -429,6 +449,7 @@ class MusEnv(AECEnv):
         counts = {}
         for v in valores:
             counts[v] = counts.get(v, 0) + 1
+        print(self.agent_selector, counts)
         return any(c >= 2 for c in counts.values())
     
     def puede_hablar(self, agent):
@@ -482,6 +503,9 @@ class MusEnv(AECEnv):
         if self.fase_actual == "MUS":
             if action in [2, 3]:  # Mus (2) o No Mus (3)
                 if action == 3:  # No Mus
+                    if self.primera_ronda:
+                        self.primera_ronda = False
+                        print("Primera ronda terminada, pasando a GRANDE")
                     self.fase_actual = "GRANDE"
                     self.reiniciar_para_nueva_fase()
                     return
@@ -489,7 +513,9 @@ class MusEnv(AECEnv):
                     # Verificar si ya votó
                     if agent not in [a for a, v in self.votos_mus]:
                         self.votos_mus.append((agent, action))
-                        
+                        if self.primera_ronda:
+                                self.mano = (self.mano + 1) % 4
+                                
                         if len(self.votos_mus) == len(self.agents):
                             # Todos dijeron Mus
                             self.fase_actual = "DESCARTE"
@@ -500,13 +526,11 @@ class MusEnv(AECEnv):
                             self.agent_selection = self.agent_selector.next()
                             # Agregar control para saber quién ha confirmado su descarte
                             self.jugadores_confirmaron_descarte = set()
-                            print(f"Cambiando a DESCARTE - Nuevo agente: {self.agent_selection}")
                             return
                         else:
                             # Pasar al siguiente jugador
                             old_agent = self.agent_selection
                             self.agent_selection = self.agent_selector.next()
-                            print(f"Siguiente jugador en MUS: {old_agent} -> {self.agent_selection}")
                             return
                     return
 
@@ -529,16 +553,14 @@ class MusEnv(AECEnv):
                 
                 # Verificar si todos han confirmado su descarte
                 if len(self.jugadores_confirmaron_descarte) == len(self.agents):
-                    self.fase_actual = "MUS"  # ¿O debería ser "GRANDE"?
+                    self.fase_actual = "MUS" 
                     self.reiniciar_para_nueva_fase()
                     # Limpiar el conjunto de confirmaciones
                     self.jugadores_confirmaron_descarte = set()
-                    print(f"Todos confirmaron descarte - Nueva fase: {self.fase_actual}")
                 else:
                     # Pasar al siguiente jugador
                     old_agent = self.agent_selection
                     self.agent_selection = self.agent_selector.next()
-                    print(f"Siguiente jugador en DESCARTE: {old_agent} -> {self.agent_selection}")
                 return
             
         elif self.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
@@ -551,13 +573,20 @@ class MusEnv(AECEnv):
             self.procesar_apuesta_corregida(self.fase_actual, agent, action)
             # Después de procesar apuesta, verificar si necesitamos cambiar de agente
             # Esto debería manejarse dentro de procesar_apuesta_corregida
+        elif self.fase_actual == "RECUENTO":
+            for agent in self.agents:
+                self.dones[agent] = True
+            return
                     
         return self.observe(self.agent_selection)
 
     def reiniciar_para_nueva_fase(self):
         """Función auxiliar para reiniciar estado entre fases"""
+        self.agents = self.possible_agents[:]
+        self.agents = self.agents[self.mano:] + self.agents[:self.mano]
         self.agent_selector = agent_selector(self.agents)
         self.agent_selection = self.agent_selector.next()
+        
         self.apuesta_actual = 0
         self.equipo_apostador = None
         self.jugador_apostador = None
@@ -566,6 +595,7 @@ class MusEnv(AECEnv):
         self.jugadores_hablaron = set()
         self.hay_ordago = False
         self.actualizar_jugadores_que_pueden_hablar()
+        
         # Limpiar confirmaciones de descarte
         if hasattr(self, 'jugadores_confirmaron_descarte'):
             self.jugadores_confirmaron_descarte = set()
@@ -640,7 +670,13 @@ class MusEnv(AECEnv):
             self.siguiente_jugador_que_puede_hablar()
         
         elif action == 1:  # Envido
-            self.apuesta_actual += 2
+            # Si es la primera apuesta, sumamos 2
+            if self.apuesta_actual == 0:
+                self.apuesta_actual += 2
+            # Si ya hay apuesta, subimos la apuesta existente
+            else:
+                self.apuesta_actual += self.apuesta_actual  # Duplicamos la apuesta
+            
             self.jugador_apostador = agent
             self.equipo_apostador = self.equipo_de_jugador[agent]
             self.jugadores_pasado = set()
@@ -860,6 +896,23 @@ class MusEnv(AECEnv):
                     equipo_ganador = None
         else:
             equipo_ganador = None
+
+        jugadores_participantes = self.jugadores_que_pueden_hablar if self.jugadores_que_pueden_hablar else set(self.agents)
+
+        if equipo_ganador is None:
+            print(f"Empate en {fase} - Determinando ganador por proximidad al mano")
+            
+            
+            if fase in ["GRANDE", "CHICA"]:
+                # Para fases de cartas individuales, comparar los jugadores directamente
+                jugador_ganador = self.determinar_jugador_mas_proximo(
+                    [mejor_jugador_equipo1, mejor_jugador_equipo2]
+                )
+                equipo_ganador = self.equipo_de_jugador[jugador_ganador]
+            else:
+                # Para fases de equipo, el equipo del mano gana
+                dealer_agent = f"jugador_{self.mano}"
+                equipo_ganador = self.equipo_de_jugador[dealer_agent]
         
         # Asignar puntos al equipo ganador
         if equipo_ganador:
@@ -892,6 +945,27 @@ class MusEnv(AECEnv):
         self.equipo_apostador = None
         self.jugador_apostador = None
         self.hay_ordago = False
+
+    def determinar_jugador_mas_proximo(self, jugadores):
+        """Determina qué jugador está más cerca del mano en el orden de juego"""
+        mano = self.mano
+        orden_juego = self.agents  # El orden actual de juego (mano primero)
+        
+        # Encontrar posiciones en el orden de juego
+        posiciones = {}
+        for jugador in jugadores:
+            try:
+                idx = orden_juego.index(jugador)
+                distancia = (idx - 0) % len(orden_juego)  # Distancia desde el mano
+                posiciones[jugador] = distancia
+            except ValueError:
+                posiciones[jugador] = float('inf')
+        
+        # Encontrar jugador con menor distancia
+        jugador_mas_cercano = min(posiciones, key=posiciones.get)
+        print(f"Jugador más cercano al mano: {jugador_mas_cercano} (distancia: {posiciones[jugador_mas_cercano]})")
+        return jugador_mas_cercano
+
 
     def calcular_puntos_pares_jugador(self, mano):
         """Calcula los puntos de pares para un jugador individual"""
@@ -944,11 +1018,13 @@ class MusEnv(AECEnv):
                 self.siguiente_jugador_que_puede_hablar()
                 
             if self.fase_actual == "RECUENTO":
+                self.mano = (self.mano + 1) % 4
                 print("Avanzando a la fase de RECUENTO 1")
                 self.determinar_ganador_global()
         else:
             self.fase_actual = "RECUENTO"
             print("Avanzando a la fase de RECUENTO 2")
+            self.ronda_completa = True
             for agent in self.agents:
                 self.dones[agent] = True
             self.determinar_ganador_global()

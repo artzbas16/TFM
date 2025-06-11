@@ -3,7 +3,9 @@ import pygame
 import sys
 from mus_env import mus
 import os
-import time
+import torch
+from marl_agent import MARLAgent
+import numpy as np
 
 class Boton:
     def __init__(self, x, y, texto, accion, ancho=150, alto=50):
@@ -60,6 +62,9 @@ acciones = {
     6: "Órdago",
     7: "Quiero"
 }
+
+modo_solo_ia = False
+training_mode = True  # Variable para modo entrenamiento
 
 # Cargar entorno
 mus_env = mus.env()
@@ -149,6 +154,102 @@ def cargar_tapete():
         tapete = pygame.Surface((WIDTH, HEIGHT))
         tapete.fill(DARK_GREEN)
         return tapete
+
+def process_observation(obs):
+    """Procesa la observación del entorno para el agente MARL"""
+    try:
+        # Extraer información básica
+        cartas_flat = obs["cartas"].flatten()
+        fase_onehot = np.zeros(7)
+        fase_onehot[obs["fase"]] = 1
+        turno_onehot = np.zeros(4)
+        turno_onehot[obs["turno"]] = 1
+        
+        # Información adicional del juego
+        apuesta_norm = obs.get("apuesta_actual", 0) / 30.0  # Normalizar apuesta
+        equipo_apostador = obs.get("equipo_apostador", 0) / 2.0  # Normalizar equipo
+        
+        # Concatenar todos los features
+        state = np.concatenate([
+            cartas_flat,           # 8 valores
+            fase_onehot,          # 7 valores  
+            turno_onehot,         # 4 valores
+            [apuesta_norm],       # 1 valor
+            [equipo_apostador]    # 1 valor
+        ])
+        
+        return state
+    except Exception as e:
+        print(f"Error procesando observación: {e}")
+        return np.zeros(21)  # Estado por defecto
+
+def get_valid_actions(env, agent):
+    """Obtiene las acciones válidas para un agente en el estado actual"""
+    try:
+        if env.fase_actual == "MUS":
+            return [2, 3]  # Mus o No Mus
+        elif env.fase_actual == "DESCARTE":
+            return [4] + list(range(11, 15))  # OK + selección cartas
+        elif env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
+            if agent not in env.jugadores_que_pueden_hablar:
+                return [0]  # Solo puede pasar
+            
+            valid = [0, 1]  # Paso, Envido
+            
+            if env.apuesta_actual > 0:
+                equipo_actual = env.equipo_de_jugador[agent]
+                equipo_apostador = env.equipo_apostador
+                
+                if equipo_actual != equipo_apostador:
+                    valid.extend([5, 7])  # No quiero, Quiero
+                    
+            if not hasattr(env, 'hay_ordago') or not env.hay_ordago:
+                valid.append(6)  # Órdago
+                
+            return valid
+        else:
+            return [0]  # Solo paso por defecto
+    except Exception as e:
+        print(f"Error obteniendo acciones válidas: {e}")
+        return [0]
+
+def calculate_rewards(env, agents):
+    """Calcula las recompensas para todos los agentes basándose en el estado del juego"""
+    rewards = {agent: 0 for agent in env.agents}
+    
+    if env.fase_actual == "RECUENTO":
+        # Recompensas finales de la partida
+        for agent in env.agents:
+            equipo = env.equipo_de_jugador[agent]
+            puntos_equipo = env.puntos_equipos[equipo]
+            puntos_oponente = env.puntos_equipos["equipo_2" if equipo == "equipo_1" else "equipo_1"]
+            
+            # Recompensa por diferencia de puntos
+            diff_puntos = puntos_equipo - puntos_oponente
+            rewards[agent] += diff_puntos * 0.5
+            
+            # Recompensa extra por ganar la partida
+            if puntos_equipo >= 30:
+                rewards[agent] += 20
+            elif puntos_oponente >= 30:
+                rewards[agent] -= 10
+                
+    else:
+        # Recompensas durante el juego
+        for agent in env.agents:
+            equipo = env.equipo_de_jugador[agent]
+            puntos_equipo = env.puntos_equipos[equipo]
+            puntos_oponente = env.puntos_equipos["equipo_2" if equipo == "equipo_1" else "equipo_1"]
+            
+            # Pequeña recompensa por diferencia de puntos actual
+            diff_puntos = puntos_equipo - puntos_oponente
+            rewards[agent] += diff_puntos * 0.1
+            
+            # Recompensa por participar activamente
+            if agent in env.jugadores_que_pueden_hablar:
+                rewards[agent] += 0.5
+    
+    return rewards
     
 def draw_step(agent, accion):
     """Resalta el jugador actual y muestra su última decisión"""
@@ -157,6 +258,8 @@ def draw_step(agent, accion):
         
     i = mus_env.agents.index(agent)
     x, y = agent_positions[i]
+
+    decision = acciones.get(accion, "Desconocida")
     
     # Solo dibujar si no está en fase de recuento y no está "done"
     if not mus_env.dones.get(agent, False) and mus_env.fase_actual != "RECUENTO":
@@ -181,6 +284,14 @@ def draw_step(agent, accion):
 def draw_table():
     # Dibujar fondo de la mesa
     screen.blit(tapete_fondo, (0, 0))
+    
+    modo_texto = font_small.render(f"Modo: {'Solo IA' if modo_solo_ia else 'Jugador Humano'}", True, YELLOW)
+    screen.blit(modo_texto, (WIDTH - 180, HEIGHT - 30))
+    
+    # Mostrar si está en modo entrenamiento
+    if training_mode:
+        train_texto = font_small.render("MODO ENTRENAMIENTO", True, YELLOW)
+        screen.blit(train_texto, (WIDTH - 180, HEIGHT - 60))
 
     if mus_env.partidas_ganadas["equipo_1"] >= 2 or mus_env.partidas_ganadas["equipo_2"] >= 2:
         draw_final_final_screen()
@@ -232,6 +343,17 @@ def draw_table():
         puntos_text = font_small.render(str(puntos_eq1 + puntos_eq2), True, YELLOW)
         screen.blit(puntos_text, (100, 125 + i * 30))
         
+    for agent in mus_env.agents:
+        # Obtener número de jugador del nombre (ej: "jugador_0" -> 0)
+        try:
+            player_num = int(agent.split('_')[1])
+        except:
+            player_num = 0
+            
+        x, y = agent_positions[player_num]
+    
+    mano_texto = font.render(f"Mano: jugador_{mus_env.mano}", True, YELLOW)
+    screen.blit(mano_texto, (WIDTH - 200, 10))
     # Mostrar apuesta actual si hay una
     if mus_env.apuesta_actual > 0:
         if mus_env.equipo_apostador:
@@ -245,8 +367,6 @@ def draw_table():
     # Dibujar cartas de los jugadores y marcar al jugador actual
     for i, agent in enumerate(mus_env.agents):
         x, y = agent_positions[i]
-        # CORRECCIÓN: Dibujar un marco alrededor del jugador actual con mejor lógica
-        
         
         # Mostrar el equipo al que pertenece cada jugador
         equipo = mus_env.equipo_de_jugador[agent]
@@ -300,7 +420,7 @@ def draw_table():
                 screen.blit(participacion_texto, (x + 20, y + 80))
         
         # Mostrar cartas según la fase
-        if i == 0:  # Jugador humano - siempre mostrar sus cartas
+        if i == 0 and not modo_solo_ia:  # Jugador humano - siempre mostrar sus cartas
             mano = mus_env.manos[agent]
             for j, (valor, palo) in enumerate(mano):
                 img = cartas_img.get((valor, palo))
@@ -313,30 +433,31 @@ def draw_table():
                 screen.blit(carta_reverso, (x - 120 + j * 70, y))
     
     # Dibujar botones según la fase actual y el contexto
-    for boton in botones:
-        if boton.accion in botones_visibles(mus_env.fase_actual, mus_env.agent_selection) or boton.accion == -1:
-            boton.dibujar(screen)
+    if not modo_solo_ia:
+        for boton in botones:
+            if boton.accion in botones_visibles(mus_env.fase_actual, mus_env.agent_selection) or boton.accion == -1 or boton.accion == -2 or boton.accion == -3:
+                boton.dibujar(screen)
     
     jugador_humano = "jugador_0"
-    
-    # Instrucciones según la fase actual
-    if mus_env.fase_actual == "DESCARTE" and mus_env.agent_selection == jugador_humano:
-        instrucciones = font.render("Selecciona cartas para descartar y pulsa OK", True, WHITE)
-        screen.blit(instrucciones, (WIDTH // 2 - 200, HEIGHT // 2))
-    
-    # Mostrar si el jugador humano no puede participar en la fase actual
-    if mus_env.fase_actual in ["PARES", "JUEGO"] and jugador_humano not in mus_env.jugadores_que_pueden_hablar:
-        no_puede_texto = font.render(f"No puedes participar en {mus_env.fase_actual}", True, RED)
-        screen.blit(no_puede_texto, (WIDTH // 2 - 150, HEIGHT // 2))
+    if not modo_solo_ia:
+        # Instrucciones según la fase actual
+        if mus_env.fase_actual == "DESCARTE" and mus_env.agent_selection == jugador_humano:
+            instrucciones = font.render("Selecciona cartas para descartar y pulsa OK", True, WHITE)
+            screen.blit(instrucciones, (WIDTH // 2 - 200, HEIGHT // 2))
+        
+        # Mostrar si el jugador humano no puede participar en la fase actual
+        if mus_env.fase_actual in ["PARES", "JUEGO"] and jugador_humano not in mus_env.jugadores_que_pueden_hablar:
+            no_puede_texto = font.render(f"No puedes participar en {mus_env.fase_actual}", True, RED)
+            screen.blit(no_puede_texto, (WIDTH // 2 - 150, HEIGHT // 2))
 
-    # Mostrar puntos en fases de apuestas
-    if mus_env.agent_selection == jugador_humano and mus_env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
-        if jugador_humano in mus_env.jugadores_que_pueden_hablar:
+        # Mostrar puntos en fases de apuestas
+        if mus_env.agent_selection == jugador_humano and mus_env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
+            if jugador_humano in mus_env.jugadores_que_pueden_hablar:
 
-            if mus_env.fase_actual == "JUEGO":
-                valor_juego = mus_env.valores_juego[jugador_humano]
-                texto_valor = font.render(f"Valor de tu mano: {valor_juego}", True, WHITE)
-                screen.blit(texto_valor, (WIDTH // 2 - 100, HEIGHT - 180))
+                if mus_env.fase_actual == "JUEGO":
+                    valor_juego = mus_env.valores_juego[jugador_humano]
+                    texto_valor = font.render(f"Valor de tu mano: {valor_juego}", True, WHITE)
+                    screen.blit(texto_valor, (WIDTH // 2 - 100, HEIGHT - 180))
 
 
 def draw_final_final_screen():
@@ -465,9 +586,10 @@ def draw_final_final_screen():
     screen.blit(ganador_texto, ganador_rect)
     
     # Instrucciones
-    instruccion = font.render("Presiona ESC para salir o ESPACIO para nueva partida", True, WHITE)
-    instruccion_rect = instruccion.get_rect(center=(WIDTH // 2, HEIGHT - 150))
-    screen.blit(instruccion, instruccion_rect)
+    if not training_mode:
+        instruccion = font.render("Presiona ESC para salir o ESPACIO para nueva partida", True, WHITE)
+        instruccion_rect = instruccion.get_rect(center=(WIDTH // 2, HEIGHT - 150))
+        screen.blit(instruccion, instruccion_rect)
 
 def draw_final_screen():
     """Dibuja la pantalla final con todas las cartas visibles y la tabla de puntos centrada"""
@@ -575,11 +697,13 @@ def draw_final_screen():
     total2_texto = font_large.render(str(total_eq2), True, equipo_colors["equipo_2"])
     total2_rect = total2_texto.get_rect(center=(tabla_x + col_width * 2 + col_width // 2, total_y + 25))
     screen.blit(total2_texto, total2_rect)
-    
-    # Instrucciones
-    instruccion = font.render("Presiona ESC para salir o ESPACIO para siguiente ronda", True, WHITE)
-    instruccion_rect = instruccion.get_rect(center=(WIDTH // 2, HEIGHT - 150))
-    screen.blit(instruccion, instruccion_rect)
+
+    if training_mode:
+        pygame.time.wait(1000)  # Espera menor en modo entrenamiento
+        mus_env.reset()
+    else:
+        pygame.time.wait(3000)
+        mus_env.reset() 
 
 def botones_visibles(fase_actual, jugador_actual):
     """Determina qué botones deben estar visibles según la fase y el contexto"""
@@ -593,14 +717,19 @@ def botones_visibles(fase_actual, jugador_actual):
         if jugador_actual not in mus_env.jugadores_que_pueden_hablar:
             return []
             
+        # Lógica mejorada para manejo de apuestas entre equipos
+        mismo_equipo = False
+        if mus_env.equipo_apostador and mus_env.equipo_de_jugador[jugador_actual] == mus_env.equipo_apostador:
+            mismo_equipo = True
+            
         if hasattr(mus_env, 'hay_ordago') and mus_env.hay_ordago:
-            if mus_env.equipo_apostador and mus_env.equipo_de_jugador[jugador_actual] != mus_env.equipo_apostador:
+            if not mismo_equipo:
                 return [5, 7]  # No quiero, Quiero
             else:
                 return []
         elif mus_env.apuesta_actual > 0:
-            if mus_env.equipo_apostador and mus_env.equipo_de_jugador[jugador_actual] != mus_env.equipo_apostador:
-                return [1, 5, 6, 7]  # Envido (subir), No quiero, Órdago, Quiero
+            if not mismo_equipo:
+                return [1, 5, 6, 7]  # Envido, No quiero, Órdago, Quiero
             else:
                 return [0, 1, 6]  # Paso, Envido, Órdago
         else:
@@ -608,14 +737,60 @@ def botones_visibles(fase_actual, jugador_actual):
     
     return []
 
+def get_ai_decision_with_learning(agent_name, marl_agents, prev_states, prev_actions, prev_rewards):
+    """Función mejorada para tomar decisiones con aprendizaje"""
+    try:
+        # Obtener observación actual
+        obs = mus_env.observe(agent_name)
+        current_state = process_observation(obs)
+        
+        # Si hay estado y acción previa, guardar experiencia
+        if agent_name in prev_states and agent_name in prev_actions:
+            prev_state = prev_states[agent_name]
+            prev_action = prev_actions[agent_name]
+            reward = prev_rewards.get(agent_name, 0)
+            done = mus_env.dones.get(agent_name, False)
+            
+            marl_agents[agent_name].remember(
+                prev_state, prev_action, reward, current_state, done
+            )
+            
+            # Entrenar con la experiencia
+            if training_mode:
+                marl_agents[agent_name].replay()
+        
+        # Obtener acciones válidas y tomar decisión
+        valid_actions = get_valid_actions(mus_env, agent_name)
+        action = marl_agents[agent_name].act(current_state, valid_actions)
+        
+        # Actualizar estados previos
+        prev_states[agent_name] = current_state
+        prev_actions[agent_name] = action
+        
+        return action
+        
+    except Exception as e:
+        print(f"Error en decisión IA para {agent_name}: {e}")
+        return 0  # Acción por defecto
+
 def main():
     running = True
-    global cartas_img, carta_reverso, botones, tapete_fondo
+    global cartas_img, carta_reverso, botones, tapete_fondo, modo_solo_ia, training_mode
     
     # Cargar imágenes
     cartas_img = cargar_cartas()
     carta_reverso = cargar_reverso()
     tapete_fondo = cargar_tapete()
+
+    # Inicializar agentes MARL
+    state_size = 21  # Tamaño del estado actualizado
+    action_size = 15  # Acciones definidas en mus.py (0-14)
+    marl_agents = {}
+    
+    # Estados y acciones previas para el aprendizaje
+    prev_states = {}
+    prev_actions = {}
+    prev_rewards = {}
 
     # Botones para todas las acciones posibles
     botones = [
@@ -627,84 +802,123 @@ def main():
         Boton(680, 600, "No quiero", 5),
         Boton(830, 600, "Órdago", 6),
         Boton(680, 550, "Quiero", 7),
-        Boton(WIDTH - 180, 50, "Salir", -1)
+        Boton(WIDTH - 180, 50, "Salir", -1),
+        Boton(20, HEIGHT - 100, "Cambiar Modo", -2),
+        Boton(20, HEIGHT - 150, "Toggle Entrenamiento", -3)  # Nuevo botón
     ]
 
     mouse_pos = (0, 0)
     jugador_humano = "jugador_0"
 
+    for agent_id in range(4):  # 4 jugadores
+        team = "equipo_1" if agent_id in [0, 2] else "equipo_2"
+        marl_agents[f"jugador_{agent_id}"] = MARLAgent(
+            state_size, action_size, agent_id, team
+        )
+        # Cargar modelo preentrenado si existe
+        model_path = f"model_jugador_{agent_id}.pth"
+        marl_agents[f"jugador_{agent_id}"].load(model_path)
+
+    episode_count = 0
+
     while running:
-        # Lógica de IA con delay automático (solo si no es fase de recuento)
+        # Lógica de IA con aprendizaje
         current_agent = mus_env.agent_selection
-        if current_agent != jugador_humano and mus_env.fase_actual != "RECUENTO" and not mus_env.dones.get(current_agent, False):
-            # Verificar si el jugador puede hablar en esta fase
-            if mus_env.fase_actual in ["PARES", "JUEGO"] and current_agent not in mus_env.jugadores_que_pueden_hablar:
-                mus_env.siguiente_jugador_que_puede_hablar()
-                continue
-            
-            if mus_env.fase_actual == "MUS":
-                # IA decide entre Mus y No Mus
-                if random.random() > 0.8:  # 20% probabilidad de decir "No Mus"
-                    action = 3  # No Mus
-                else:
-                    action = 2  # Mus
 
-            elif mus_env.fase_actual == "DESCARTE":
-                if current_agent not in mus_env.cartas_a_descartar or not mus_env.cartas_a_descartar[current_agent]:
-                    num_descartes = random.randint(0, 2)
-                    descartes = random.sample(range(4), num_descartes) if num_descartes > 0 else []
-                    mus_env.cartas_a_descartar[current_agent] = descartes
-                action = 4
-
-            elif mus_env.fase_actual in ["GRANDE", "CHICA", "PARES", "JUEGO"]:
-                puntos = mus_env.calcular_puntos(mus_env.manos[current_agent], mus_env.fase_actual)
-                
-                # Lógica de IA mejorada para las fases de apuestas
-                if hasattr(mus_env, 'hay_ordago') and mus_env.hay_ordago:
-                    if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
-                        action = 7  # Quiero (capear)
-                    else:
-                        action = 0  # Paso
-                elif mus_env.apuesta_actual > 0:
-                    if mus_env.equipo_apostador and mus_env.equipo_de_jugador[current_agent] != mus_env.equipo_apostador:
-                        action = 1  # Envido (subir)
-                    else:
-                        action = 0  # Paso
-                else:
-                    
-                    action = 0  # Paso
+        if (current_agent != jugador_humano or modo_solo_ia) and mus_env.fase_actual != "RECUENTO" and not mus_env.dones.get(current_agent, False):
+            # Calcular recompensas actuales
+            current_rewards = calculate_rewards(mus_env, marl_agents)
             
+            # Tomar decisión con aprendizaje
+            action = get_ai_decision_with_learning(
+                current_agent, marl_agents, prev_states, prev_actions, current_rewards
+            )
+            
+            # Actualizar recompensas previas
+            prev_rewards = current_rewards
+            
+            # Mostrar decisión y ejecutar
             draw_step(current_agent, action)
-            pygame.display.flip() 
+            pygame.display.flip()
+            
+            if training_mode:
+                pygame.time.wait(100)  # Más rápido en entrenamiento
+            else:
+                pygame.time.wait(500)  # Normal en juego
+                
             mus_env.step(action)
-
+            
+            # Compartir experiencia entre compañeros de equipo
+            if training_mode and current_agent in marl_agents:
+                team = marl_agents[current_agent].team
+                for other_agent_name, other_agent in marl_agents.items():
+                    if other_agent.team == team and other_agent_name != current_agent:
+                        if random.random() < 0.1:  # 10% de probabilidad de compartir
+                            marl_agents[current_agent].share_experience(other_agent)
+        
         mouse_pos = pygame.mouse.get_pos()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                # Guardar modelos antes de salir
+                if training_mode:
+                    for i, agent_name in enumerate(marl_agents.keys()):
+                        marl_agents[agent_name].save(f"model_jugador_{i}.pth")
+                    print("Modelos guardados al salir")
                 running = False
             
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
+                    # Guardar modelos antes de salir
+                    if training_mode:
+                        for i, agent_name in enumerate(marl_agents.keys()):
+                            marl_agents[agent_name].save(f"model_jugador_{i}.pth")
+                        print("Modelos guardados al salir")
                     running = False
                 elif event.key == pygame.K_SPACE and mus_env.fase_actual == "RECUENTO":
+                    episode_count += 1
                     mus_env.reset()
+                    prev_states.clear()
+                    prev_actions.clear()
+                    prev_rewards.clear()
+                    
+                    # Guardar modelos cada 10 episodios en modo entrenamiento
+                    if training_mode and episode_count % 10 == 0:
+                        for i, agent_name in enumerate(marl_agents.keys()):
+                            marl_agents[agent_name].save(f"model_jugador_{i}_ep_{episode_count}.pth")
+                        print(f"Modelos guardados en episodio {episode_count}")
             
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # Manejar botón Salir
+                # Manejar botones de control
                 for boton in botones:
-                    if boton.fue_click(mouse_pos) and boton.accion == -1:
-                        running = False
-                        break
+                    if boton.fue_click(mouse_pos):
+                        if boton.accion == -1:  # Salir
+                            if training_mode:
+                                for i, agent_name in enumerate(marl_agents.keys()):
+                                    marl_agents[agent_name].save(f"model_jugador_{i}.pth")
+                                print("Modelos guardados al salir")
+                            running = False
+                            break
+                        elif boton.accion == -2:  # Cambiar modo
+                            modo_solo_ia = not modo_solo_ia
+                            if modo_solo_ia and mus_env.fase_actual != "RECUENTO":
+                                mus_env.reset()
+                                prev_states.clear()
+                                prev_actions.clear()
+                                prev_rewards.clear()
+                            break
+                        elif boton.accion == -3:  # Toggle entrenamiento
+                            training_mode = not training_mode
+                            print(f"Modo entrenamiento: {'ACTIVADO' if training_mode else 'DESACTIVADO'}")
+                            break
                 
                 # No procesar clics en fase de recuento
                 if mus_env.fase_actual == "RECUENTO":
                     continue
                 
                 # Verificar si es turno del jugador humano
-                if mus_env.agent_selection == "jugador_0":
+                if mus_env.agent_selection == "jugador_0" and not modo_solo_ia:
                     if mus_env.fase_actual in ["PARES", "JUEGO"] and jugador_humano not in mus_env.jugadores_que_pueden_hablar:
-                        # Si no puede hablar, pasar al siguiente jugador automáticamente
                         mus_env.siguiente_jugador_que_puede_hablar()
                         continue
                         
@@ -725,13 +939,14 @@ def main():
                             if carta_rect.collidepoint(mouse_pos):
                                 mus_env.step(11 + j)
                                 break
+        
         # Actualizar estado visual de los botones (hover)
         for boton in botones:
             boton.actualizar_estado(mouse_pos)
         
         draw_table()
         pygame.display.flip()
-        clock.tick(60)
+        clock.tick(60 if not training_mode else 120)  # Más rápido en entrenamiento
 
     pygame.quit()
     sys.exit()
